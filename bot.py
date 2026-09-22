@@ -21,6 +21,11 @@ tgalarm — Telegram 鬧鐘・計時器機械人（Android Termux 直連系統�
     歌單 名 連結（儲存）    歌單 / 播程 / 取消播 編號
     timer 25m             alarm 07:00
 
+WhatsApp 夜更相（純 Python，毫秒内動作）：
+    搬相                  將最近夜更時段（23:00–07:00）WhatsApp 相（包自己傳出 Sent
+                          嘅）搬去系統相簿 WA_Night；防撞名自動加 -1 -2…
+    搬相預覽              齋列出符合嘅相，唔郁真身
+
 設定來源（優先次序：環境變數 > ~/.tgalarm/config）：
     BOT_TOKEN          必填，向 @BotFather 申請（setup.sh 會問你一次）
     ALLOWED_CHAT_IDS   白名單；留空 = 第一個 send 訊息嘅人自動成為擁有者
@@ -131,7 +136,8 @@ HELP = (
     "🧩 時間分配（到點自動連環計時）：\n"
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
-    "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁"
+    "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
+    "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬"
 )
 
 # ---------------- 指令解析 ----------------
@@ -384,6 +390,10 @@ def parse_player(text: str) -> PlayerCmd | None:
     """解析歌單/排程相關指令；唔係嘅話回傳 None（交返畀計時/鬧鐘解析）。
     唔做 lower()——YouTube URL 大小寫敏感；英文關鍵字改用 IGNORECASE。"""
     s = re.sub(r"\s+", " ", text.strip())
+    if re.fullmatch(r"/?搬(?:whatsapp|wa)?相", s, re.IGNORECASE):
+        return PlayerCmd("wamove")
+    if re.fullmatch(r"/?搬(?:whatsapp|wa)?相\s*(?:預覽|preview|list)", s, re.IGNORECASE):
+        return PlayerCmd("wamove", ref="preview")
     if re.fullmatch(r"/?(?:停|停止|停播|stop)", s, re.IGNORECASE):
         return PlayerCmd("stop")
     if re.fullmatch(r"/?(?:播程|排程|播放日程|日程|jobs)", s, re.IGNORECASE):
@@ -1418,8 +1428,131 @@ async def _restore_jobs(app) -> None:
             log.warning("啟動時更新待辦訊息失敗：%s", e)
 
 
+# ─── WhatsApp 夜更相搬移 ─────────────────────────────────────
+# 最短路徑：純 Python scandir + rename，指令 → 執行一步直達，毫秒級回應。
+# 「搬相」：將最近夜更時段（預設 23:00–07:00）嘅 WhatsApp 相（包含自己傳出嘅 Sent）
+# 搬到 Picture 相簿 WA_Night；「搬相預覽」：齋列唔搬。
+_WA_MEDIA_CANDIDATES = (
+    "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images",
+    "/storage/emulated/0/WhatsApp/Media/WhatsApp Images",
+)
+_WA_DEST = "/storage/emulated/0/Pictures/WA_Night"
+_WA_EXTS = (".jpg", ".jpeg")
+_NIGHT_START, _NIGHT_END = 23, 7   # 夜更時段 23:00 → 翌日 07:00
+
+
+def _wa_dirs(src_root: str | None = None) -> list:
+    """WhatsApp 圖片目錄（接收區）＋ Sent/Outgoing（自己傳出嘅一併包埋）。
+    src_root 畀測試注入；預設自動偵測新/舊版路徑。搵唔到 → 空 list。"""
+    root = None
+    if src_root:
+        root = src_root if os.path.isdir(src_root) else None
+    else:
+        for c in _WA_MEDIA_CANDIDATES:
+            if os.path.isdir(c):
+                root = c
+                break
+    if root is None:
+        return []
+    dirs = [root]
+    for sub in ("Sent", "Outgoing"):
+        p = os.path.join(root, sub)
+        if os.path.isdir(p):
+            dirs.append(p)
+    return dirs
+
+
+def _wa_night_window(now: dt.datetime) -> tuple:
+    """最近嘅夜更時段 (start, end)：[start, end)。
+    23:00 後／07:00 前 → 今晚（進行緊，搬到而家為止）；
+    其他時間 → 尋晚 23:00 → 今朝 07:00（已完成嘅夜更）。"""
+    if now.hour >= _NIGHT_START:
+        start = now.replace(hour=_NIGHT_START, minute=0, second=0, microsecond=0)
+        end = (start + dt.timedelta(days=1)).replace(hour=_NIGHT_END)
+    else:
+        end = now.replace(hour=_NIGHT_END, minute=0, second=0, microsecond=0)
+        start = (end - dt.timedelta(days=1)).replace(hour=_NIGHT_START)
+    return start, end
+
+
+def _wa_scan(dirs: list, start: dt.datetime, end: dt.datetime) -> list:
+    """每個 dir 第一層、jpg/jpeg、mtime 落喺 [start, end) → [(ts, path)]，按時間排序。"""
+    s_ep, e_ep = start.timestamp(), end.timestamp()
+    hits = []
+    for d in dirs:
+        try:
+            with os.scandir(d) as it:
+                for ent in it:
+                    try:
+                        if not ent.is_file(follow_symlinks=False):
+                            continue
+                        if not ent.name.lower().endswith(_WA_EXTS):
+                            continue
+                        ts = ent.stat(follow_symlinks=False).st_mtime
+                    except OSError:
+                        continue
+                    if s_ep <= ts < e_ep:
+                        hits.append((ts, ent.path))
+        except OSError:
+            continue
+    hits.sort()
+    return hits
+
+
+def _wa_move(now: dt.datetime, preview: bool = False,
+             src_root: str | None = None, dest: str | None = None) -> str:
+    """搬相主體：掃 →（預覽）列／真搬，兼防撞名。回傳畀用戶嘅訊息。"""
+    dirs = _wa_dirs(src_root)
+    if not dirs:
+        return ("❌ 搵唔到 WhatsApp Images 資料夾。\n"
+                "先喺 Termux 行：termux-setup-storage（撳「允許」儲存權限），再 send「搬相」")
+    dest = dest or _WA_DEST
+    start, end = _wa_night_window(now)
+    hits = _wa_scan(dirs, start, end)
+    span = f"{start:%m-%d %H:%M} → {end:%m-%d %H:%M}"
+    if not hits:
+        return f"✅ 夜更時段（{span}）冇相，唔使搬。"
+    sent_n = sum(1 for _, p in hits if "/Sent/" in p or "/Outgoing/" in p)
+    lines = [f"🌙 夜更時段 {span}，共 {len(hits)} 張（其中自己傳出 {sent_n} 張）："]
+    for ts, path in hits[:8]:
+        tag = "↗" if "/Sent/" in path or "/Outgoing/" in path else "↘"
+        lines.append(f"  {tag}[{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] {os.path.basename(path)}")
+    if len(hits) > 8:
+        lines.append(f"  …（仲有 {len(hits) - 8} 張）")
+    if preview:
+        lines.append("（預覽：冇郁任何相；send「搬相」先真搬）")
+        return "\n".join(lines)
+    os.makedirs(dest, exist_ok=True)
+    moved = 0
+    for ts, path in hits:
+        base = os.path.basename(path)
+        target = os.path.join(dest, base)
+        if os.path.exists(target):                      # 防撞名 → -1 -2…
+            stem, ext = os.path.splitext(base)
+            i = 1
+            while os.path.exists(os.path.join(dest, f"{stem}-{i}{ext}")):
+                i += 1
+            target = os.path.join(dest, f"{stem}-{i}{ext}")
+        try:
+            os.replace(path, target)
+            moved += 1
+        except OSError as e:
+            log.warning("搬相失敗 %s：%s", path, e)
+    lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {dest}")
+    lines.append("（WhatsApp 對話內嗰啲縮圖會變灰；去返相簿 WA_Night 睇原圖）")
+    ms = shutil.which("termux-media-scan")              # 通知相簿掃描，失敗不礙
+    if ms:
+        try:
+            subprocess.run([ms, dest], capture_output=True, timeout=5, check=False)
+        except Exception:  # noqa: BLE001
+            pass
+    return "\n".join(lines)
+
+
 def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     a = cmd.action
+    if a == "wamove":
+        return _wa_move(now, preview=(cmd.ref == "preview"))
     if a == "play":
         url, info = _resolve_playlist(cmd.ref)
         if url is None:
