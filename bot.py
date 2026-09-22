@@ -918,6 +918,62 @@ def _stop() -> tuple:
 _TASKS: dict = {}   # job_id -> asyncio.Task
 _APP = None         # telegram Application（恢復排程/到點回覆用）
 
+# ─── 網絡閃斷韌性 ─────────────────────────────────────────────
+# 手機流動網絡（尤其 Private DNS 嚴格模式）會有秒級閃斷；
+# 到點訊息一碰 NetworkError 就 drop 會漏鬧鐘 → 退避重試保證送達。
+_NET_RETRY_BACKOFF = (5, 20, 45)  # 嘗試 3 次之間嘅等待秒數
+
+
+def _err_kind(e: Exception) -> str:
+    """分類 telegram 錯誤：'net'（閃斷可重試）/ 'ratelimit' / 'other'。
+    靠類名同屬性判斷，裝置外（冇裝 telegram）都 work。"""
+    name = e.__class__.__name__
+    if name == "RetryAfter" or hasattr(e, "retry_after"):
+        return "ratelimit"
+    if "NetworkError" in name or "TimedOut" in name:
+        return "net"
+    return "other"
+
+
+async def _send_safe(chat_id: int, text: str, label: str = "訊息") -> bool:
+    """到點訊息發送：閃斷退避重試（5s→20s→45s），唔再一碰就 drop。回傳最終成敗。"""
+    if _APP is None:
+        return False
+    last = None
+    for i in range(len(_NET_RETRY_BACKOFF)):
+        try:
+            await _APP.bot.send_message(chat_id, text)
+            if i:
+                log.info("%s重試後已送出", label)
+            return True
+        except Exception as e:  # noqa: BLE001
+            last = e
+            kind = _err_kind(e)
+            if kind == "ratelimit":
+                wait = min(float(getattr(e, "retry_after", _NET_RETRY_BACKOFF[i])) + 1, 90)
+                log.info("Telegram 限流：%s %.0f 秒後重試", label, wait)
+                await asyncio.sleep(wait)
+            elif kind == "net":
+                if i + 1 >= len(_NET_RETRY_BACKOFF):
+                    break
+                log.info("網絡閃斷，%s %d 秒後重試（第 %d/%d 次）",
+                         label, _NET_RETRY_BACKOFF[i], i + 2, len(_NET_RETRY_BACKOFF))
+                await asyncio.sleep(_NET_RETRY_BACKOFF[i])
+            else:
+                log.warning("%s發送失敗：%s", label, e)
+                return False
+    log.warning("%s重試後仍未能送出（網絡持續異常）：%s", label, last)
+    return False
+
+
+async def _on_error(update, context) -> None:
+    """統一收拾長輪詢網絡噪音（PTB 會自動重連）；真 bug 仍然照報。"""
+    err = getattr(context, "error", None)
+    if err is not None and _err_kind(err) == "net":
+        log.info("網絡閃斷（%s）——長輪詢會自動重連", err.__class__.__name__)
+    else:
+        log.error("未捕捉錯誤：%r", err, exc_info=err)
+
 
 def _jobs() -> list:
     return _load_json(JOBS_PATH, [])
@@ -1010,11 +1066,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         msg = f"⏰ 到點！{how}"
     else:
         msg = f"❌ 排程執行失敗：{info[:150]}" + (_BAL_TIP if _is_bal_denied(info) else "")
-    if _APP is not None:
-        try:
-            await _APP.bot.send_message(job["chat_id"], msg)
-        except Exception as e:  # noqa: BLE001
-            log.warning("到點回覆失敗：%s", e)
+    await _send_safe(job["chat_id"], msg, "排程到點訊息")
     if job.get("daily"):
         job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
         jobs = _jobs()
@@ -1155,11 +1207,7 @@ async def _fire_alloc(job: dict) -> None:
     else:
         text = f"❌ 開唔到計時器「{seg['text']}」：{str(info)[:120]}" + (
             _BAL_TIP if _is_bal_denied(info) else "")
-    if _APP is not None:
-        try:
-            await _APP.bot.send_message(job["chat_id"], text)
-        except Exception as e:  # noqa: BLE001
-            log.warning("分配到點回覆失敗：%s", e)
+    await _send_safe(job["chat_id"], text, "分配到點訊息")
     fired_at = dt.datetime.fromisoformat(job["next"])
     keep = True
     if idx + 1 < len(segs):
@@ -1647,6 +1695,7 @@ def main():
     app.add_handler(CommandHandler("help", _on_start))
     app.add_handler(CallbackQueryHandler(_on_todo_callback, pattern=r"^todo:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
+    app.add_error_handler(_on_error)
     log.info("Bot 啟動（長輪詢模式，DRY_RUN=%s，config=%s）", DRY_RUN, CONFIG_PATH)
     app.run_polling(drop_pending_updates=True)
 
