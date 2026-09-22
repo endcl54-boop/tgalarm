@@ -21,6 +21,9 @@ tgalarm — Telegram 鬧鐘・計時器機械人（Android Termux 直連系統�
     歌單 名 連結（儲存）    歌單 / 播程 / 取消播 編號
     timer 25m             alarm 07:00
 
+時間分配快進：
+    完成 / 早完成        提早做完而家呢段 → 即刻快進下一階段（舊倒計時撳停就得）
+
 WhatsApp 夜更相（純 Python，毫秒内動作）：
     搬相                  將最近夜更時段（23:00–07:00）WhatsApp 相（包自己傳出 Sent
                           嘅）搬去系統相簿 WA_Night；防撞名自動加 -1 -2…
@@ -137,7 +140,8 @@ HELP = (
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
     "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
-    "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬"
+    "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
+    "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
 )
 
 # ---------------- 指令解析 ----------------
@@ -390,6 +394,8 @@ def parse_player(text: str) -> PlayerCmd | None:
     """解析歌單/排程相關指令；唔係嘅話回傳 None（交返畀計時/鬧鐘解析）。
     唔做 lower()——YouTube URL 大小寫敏感；英文關鍵字改用 IGNORECASE。"""
     s = re.sub(r"\s+", " ", text.strip())
+    if re.fullmatch(r"/?(?:完成|完成咗|早完成|提早完成|下一階段|下階段|跳過|skip|next)\s*[！!]?", s, re.IGNORECASE):
+        return PlayerCmd("alloc_done")
     if re.fullmatch(r"/?搬(?:whatsapp|wa)?相", s, re.IGNORECASE):
         return PlayerCmd("wamove")
     if re.fullmatch(r"/?搬(?:whatsapp|wa)?相\s*(?:預覽|preview|list)", s, re.IGNORECASE):
@@ -1207,6 +1213,51 @@ def _alloc_breakdown(job: dict) -> str:
     return "\n".join(lines)
 
 
+def _alloc_advance(chat_id: int, now: dt.datetime) -> str:
+    """「完成」：提早做完而家呢段 → 立刻快進下一階段。
+    找緊進行中嘅分配（idx>=1 表示第一下已 fire；next 係呢段尾）。
+    舊 system 倒計時冇 intent 可以取消（只可以停緊響嘅），會照響；回覆有提用戶。"""
+    jobs = _jobs()
+    runs = [j for j in jobs if j.get("type") == "alloc"
+            and j.get("idx", 0) >= 1
+            and dt.datetime.fromisoformat(j["next"]) > now]
+    if not runs:
+        return ("❓ 而家冇進行中嘅時間分配。\n"
+                "開新 block：`1930至2230 分配 温習、做功課`；send「播程」睇有冇排咗嘅。")
+    # 多個就揀最雷嘅嗰段
+    job = min(runs, key=lambda j: dt.datetime.fromisoformat(j["next"]))
+    segs = job.get("segments", [])
+    idx = job.get("idx", 0)                  # 下一段嘅索引（進行中 = idx-1）
+    cur = segs[idx - 1] if segs and idx - 1 < len(segs) else {"text": "?"}
+    remain = max(0, int((dt.datetime.fromisoformat(job["next"]) - now).total_seconds()))
+    saved = fmt_duration(remain) if remain >= 30 else "少於 30 秒"
+    t = _TASKS.pop(job["id"], None)
+    if t:
+        t.cancel()
+    if idx < len(segs):                      # 仲有下一段 → 即刻 fire 佢
+        nxt = segs[idx]
+        job["next"] = now.isoformat()
+        _save_json(JOBS_PATH, jobs)          # job 已喺 jobs list 內（引用）
+        _arm(job)
+        return (f"⏩ 提早完成「{cur['text']}」（慳返 {saved}）\n"
+                f"→ 即刻開第 {idx + 1}/{len(segs)} 項「{nxt['text']}」🚀\n"
+                f"（時鐘 App 嘅舊倒計時會照響，撳停就得）")
+    # 最後一段都做埋 → 提早收工
+    jobs2 = [j for j in jobs if j["id"] != job["id"]]
+    if job.get("daily"):
+        job["idx"] = 0
+        job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
+        jobs2.append(job)
+        _save_json(JOBS_PATH, jobs2)
+        _arm(job)
+        tail = "（每日分配，聽日自動重開）"
+    else:
+        _save_json(JOBS_PATH, jobs2)
+        tail = "（一次性分配，已刪走）"
+    return (f"⏩ 提早完成「{cur['text']}」（慳返 {saved}）\n"
+            f"🏁 最後一項都做埋，成個分配提早收工！{tail}")
+
+
 async def _fire_alloc(job: dict) -> None:
     """分配排程觸發：fire 呢段嘅計時器 → 自動排下一段；
     最後一段做晒就刪走（每日就重設去第二日）。"""
@@ -1566,6 +1617,8 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     a = cmd.action
     if a == "wamove":
         return _wa_move(now, preview=(cmd.ref == "preview"))
+    if a == "alloc_done":
+        return _alloc_advance(chat_id, now)
     if a == "play":
         url, info = _resolve_playlist(cmd.ref)
         if url is None:
