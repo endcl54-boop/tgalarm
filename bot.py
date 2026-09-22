@@ -553,7 +553,7 @@ def run_intent(cmd: list) -> tuple:
         log.info("DRY_RUN: %s", shlex.join(cmd))
         return True, "DRY_RUN " + shlex.join(cmd)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
         out = (r.stdout + r.stderr).strip()
         ok = r.returncode == 0 and "Error" not in out
         if not ok:
@@ -814,10 +814,10 @@ _UA = ("Mozilla/5.0 (Linux; Android 10) "
 
 
 def _fetch(url: str) -> str:
-    """下載頁面文字（上限 2MB）。"""
+    """下載頁面文字（上限 2MB）。4 秒硬頂——畀面反應夠快，塞網即走後備。"""
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=10) as r:
+    with urllib.request.urlopen(req, timeout=4) as r:
         return r.read(2_000_000).decode("utf-8", "ignore")
 
 
@@ -853,10 +853,22 @@ def _playlist_videos_html(list_id: str) -> list:
         return []
 
 
+_PL_CACHE: dict = {}            # list_id -> (timestamp, [videoId])；session 快取
+_PL_CACHE_TTL = 6 * 3600        # 6 小時內重播 = 零網絡直達 am start
+
+
 def _playlist_videos(list_id: str) -> list:
     """由 YouTube playlist 抽出全部 videoId（去重、保持順序；唔使 API key）。
-    優先官方 RSS，失敗先爬頁面。"""
-    return _playlist_videos_rss(list_id) or _playlist_videos_html(list_id)
+    優先 6 小時 session 快取（上次成功嘅就算過期都攞嚟做後備），
+    miss 先行官方 RSS，再失敗爬頁面。最快響應：第二次起唔出網。"""
+    hit = _PL_CACHE.get(list_id)
+    if hit and dt.datetime.now().timestamp() - hit[0] < _PL_CACHE_TTL:
+        return hit[1]
+    vids = _playlist_videos_rss(list_id) or _playlist_videos_html(list_id)
+    if vids:
+        _PL_CACHE[list_id] = (dt.datetime.now().timestamp(), vids)
+        return vids
+    return hit[1] if hit else []   # 網絡死檔：拎到舊快取總好過開返歌單頁
 
 
 def _autoplay_url(url: str, shuffle: bool = False) -> tuple:
@@ -1540,10 +1552,11 @@ def _wa_move(now: dt.datetime, preview: bool = False,
             log.warning("搬相失敗 %s：%s", path, e)
     lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {dest}")
     lines.append("（WhatsApp 對話內嗰啲縮圖會變灰；去返相簿 WA_Night 睇原圖）")
-    ms = shutil.which("termux-media-scan")              # 通知相簿掃描，失敗不礙
+    ms = shutil.which("termux-media-scan")              # 通知相簿掃描，開槍就走唔等佢
     if ms:
         try:
-            subprocess.run([ms, dest], capture_output=True, timeout=5, check=False)
+            subprocess.Popen([ms, dest], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:  # noqa: BLE001
             pass
     return "\n".join(lines)
