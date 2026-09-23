@@ -660,9 +660,38 @@ def _nav_target(arg: str) -> tuple:
     return _dests().get(name, name), mode, name
 
 
+# ---- Shizuku / rish：用 adb shell 身份發 intent ----
+# vivo/小米等廠就算攞齊「後台彈窗」權限，仍會對 Termux 呢類背景 app 靜默截糊；
+# 但 rish 令指令以 shell（uid 2000）執行——shell 係特權 caller，唔經嗰道閘。
+_RISH_CACHE = {"t": 0.0, "ok": False}
+_RISH_TTL = 600.0  # 10 分鐘 TTL：Shizuku 重開機會停，用戶重啟之後快啲執返
+
+
+def _rish_probe() -> bool:
+    """真實探測：rish 喺 PATH + Shizuku 行緊（見到 uid=2000 先用得）。"""
+    if not shutil.which("rish"):
+        return False
+    try:
+        r = subprocess.run(["rish", "-c", "id"], capture_output=True, text=True, timeout=10)
+        return r.returncode == 0 and "uid=2000" in (r.stdout + r.stderr)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rish_available() -> bool:
+    """帶 TTL 快取嘅可用性（負面都快取，免至每次導航都開 JVM 探測）。"""
+    now = dt.datetime.now().timestamp()
+    if now - _RISH_CACHE["t"] < _RISH_TTL:
+        return _RISH_CACHE["ok"]
+    _RISH_CACHE["ok"] = _rish_probe()
+    _RISH_CACHE["t"] = now
+    return _RISH_CACHE["ok"]
+
+
 def _open_nav(dest: str, mode: str = "r") -> tuple:
-    """開 Google Maps 導航，三重後備：
-    ① google.navigation VIEW（首選）② MapsActivity 明部件開 https dir
+    """開 Google Maps 導航，rish（Shizuku/adb shell）優先，三重後備：
+    ⓪ rish＋喚醒螢幕（vivo/小米 背景閘剋星；有 Shizuku 一定行呢步）
+    ① google.navigation VIEW ② MapsActivity 明部件開 https dir
     ③ https dir 交畀系統揀 app（Maps 有事嗰啲手機可以用瀏覽器檔）。
     純文字→google.navigation:q=…；連結/geo URI→直接開。"""
     import urllib.parse
@@ -670,14 +699,23 @@ def _open_nav(dest: str, mode: str = "r") -> tuple:
         uri = dest
     else:
         uri = f"google.navigation:q={urllib.parse.quote(dest)}&mode={mode}"
-    ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", uri])
+    base = ["am", "start", "-a", "android.intent.action.VIEW", "-d", uri]
+    if _rish_available():
+        ok, out = run_intent(["rish", "-c",
+                              "input keyevent KEYCODE_WAKEUP; " + shlex.join(base)])
+        if ok:
+            log.info("導航已經 rish（adb shell 身份）發出")
+            return ok, out
+        log.info("rish 發送失敗，轉返普通 am：%s", out[:120])
+    ok, out = run_intent(base)
     if ok:
         return ok, out
     tmode = {"r": "transit", "w": "walking", "d": "driving"}.get(mode, "transit")
     web = (f"https://www.google.com/maps/dir/?api=1&destination="
            f"{urllib.parse.quote(dest)}&travelmode={tmode}")
     ok, out = run_intent(["am", "start", "-n",
-                          "com.google.android.apps.maps/.MapsActivity", "-d", web])
+                          "com.google.android.apps.maps/com.google.android.maps.MapsActivity",
+                          "-d", web])
     if ok:
         return ok, out
     return run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", web])
@@ -1075,8 +1113,9 @@ def _arm(job: dict) -> None:
     _TASKS[job["id"]] = asyncio.get_event_loop().create_task(_fire_later(job, delay))
 
 
-_BAL_TIP = ("\n💡 可能係 Android 背景啟動限制擋住咗：設定 → 應用程式 → Termux →"
-            " 「喺其他應用上層顯示」→ 允許；兼將電池用量設做「無限制」")
+_BAL_TIP = ("\n💡 背景啟動被擋：vivo/Funtouch 要開「後台彈出界面」（設定→應用與權限→"
+            "權限管理→其他權限→Termux；或 i管家→應用管理→權限管理），兼開「鎖屏顯示」；"
+            "其他機開「喺其他應用上層顯示」。詳細路徑 send「修復」")
 
 
 def _is_bal_denied(info) -> bool:
@@ -1099,8 +1138,16 @@ async def _fire_later(job: dict, delay: float) -> None:
         ok, info = run_intent(timer_intent_cmd(job["seconds"], job.get("label", "")))
         how = _fmt_job_content(job)
     elif jtype == "nav":
+        if shutil.which("rish") and not DRY_RUN:
+            # fire 前強制重探：你可能啱啱喺 Shizuku app 重啟咗 server，
+            # 唔好跟 10 分鐘 TTL 舊快取（每次 fire 至多探一次，JVM 開銷值得）
+            _RISH_CACHE["ok"] = _rish_probe()
+            _RISH_CACHE["t"] = now.timestamp()
         ok, info = _open_nav(job.get("url") or job.get("label", ""), job.get("mode", "d"))
         how = f"開導航去「{job.get('label') or job.get('url')}」"
+        if shutil.which("rish") and not _RISH_CACHE["ok"] and not DRY_RUN:
+            how += ("\n⚠️ 但 Shizuku server 冇行緊——導航彈唔出！"
+                    "入 Shizuku app 撳「啟動」，下次就會彈")
     else:
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"
@@ -1758,7 +1805,9 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                 "① 呢度彈「⏰ 到點」訊息\n"
                 "② 時鐘 app 彈出 90 秒計時器\n"
                 "❗ 兩樣都冇 → bot 被系統殺咗（send「修復」開保障設定）\n"
-                "❗ 有訊息冇計時器 → 背景啟動被擋（「喺其他應用上層顯示」要開）\n"
+                "❗ 有訊息冇計時器/冇導航 → 背景彈窗被擋：\n"
+                "　• vivo/Funtouch：要開「後台彈出界面」（設定→應用與權限→權限管理→其他權限）\n"
+                "　• 其他機：「喺其他應用上層顯示」要開\n"
                 "（試埋熄螢幕等，最似你半夜放工狀態）")
     if a == "protect":
         run_intent(["am", "start", "-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
@@ -1766,12 +1815,17 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         run_intent(["am", "start", "-a", "android.settings.action.MANAGE_OVERLAY_PERMISSION",
                     "-d", "package:com.termux"])
         run_intent(["am", "start", "-a", "android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS"])
-        return ("🔧 已幫你彈出設定頁，逐項撥好（解決深夜遲響/唔響）：\n"
-                "① 電池 → 揀「無限制」（Termux 唔被省電壓，最緊要）\n"
+        return ("🔧 已幫你彈出設定頁，逐項撥好（解決深夜遲響/唔響/導航彈唔出）：\n"
+                "① 電池 → 揀「無限制」（最緊要：Termux 唔被省電壓）\n"
                 "② 通知 → 允許（冇常駐通知 → 系統易殺、wakelock 失效）\n"
-                "③ 喺其他應用上層顯示 → 允許（鎖屏彈計時器/導航要用）\n"
-                "④〔小米/華為/OPPO 專用〕自啟動、後台活動、彈出視窗（後台彈出界面）→ 允許\n"
-                "撥好之後 send「自檢」+ 熄螢幕 3 分鐘驗證一次")
+                "③ 喺其他應用上層顯示 → 允許（鎖屏彈計時器要用）\n"
+                "④〔vivo/Funtouch 必做〕「後台彈出界面」＋「鎖屏顯示」→ 允許\n"
+                "　路徑：設定→應用與權限→權限管理→其他權限→搵 Termux；\n"
+                "　或 i管家→應用管理→權限管理→應用→Termux（同名開關喺度）\n"
+                "⑤〔小米/華為/OPPO〕自啟動、後台活動、彈出視窗 → 允許\n"
+                "⑥〔終極·唔使靠廠權限〕裝 Shizuku＋入 app「在終端應用程式使用」匯出\n"
+                "　rish 兩個檔案，裝落 Termux——bot 會自動改用 adb 身份彈窗，背景閘完全繞過\n"
+                "撥好之後熄屏鎖機，send「自檢」等 3 分鐘驗證一次")
     if a == "jobs":
         return _fmt_jobs(now)
     if a == "cancel":
