@@ -483,7 +483,7 @@ def parse_player(text: str) -> PlayerCmd | None:
     if re.fullmatch(r"(?:復活|重開|救)\s*shizuku|shizuku\s*(?:復活|重開|救返)", s, re.IGNORECASE):
         return PlayerCmd("shizuku_revive")
     # 時間分配：[每日] hhmm至hhmm 分配 [留空N% 或 留空N分鐘] 項目[x比例]…
-    m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(%|分鐘|分钟|分)\s*)?(.+)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(\%|分鐘|分钟|分鐘|分锺|分鍾|分)\s*)?(.+)", s, re.IGNORECASE)
     if m:
         r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
@@ -492,7 +492,7 @@ def parse_player(text: str) -> PlayerCmd | None:
                              hour2=r2[0], minute2=r2[1],
                              buf=b_pct, buf_min=b_min, ref=m.group(5).strip())
         return None
-    m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(%|分鐘|分钟|分)\s*)?(.+)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(\%|分鐘|分钟|分鐘|分锺|分鍾|分)\s*)?(.+)", s, re.IGNORECASE)
     if m:
         r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
