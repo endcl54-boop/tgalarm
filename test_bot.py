@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import bot
 from bot import (
@@ -1191,6 +1192,95 @@ class TestAllocBufMinutes(unittest.TestCase):
                           {"text": "b", "seconds": 600, "w": 1}], "idx": 1}
         self.assertTrue(bot._alloc_reflow(j, dt.datetime(2026, 1, 5, 19, 30), 1))
         self.assertEqual(j["segments"][1]["seconds"], 90 * 60)
+
+
+class TestAdbLane(unittest.TestCase):
+    """ADB lane（第三條 uid 2000 通道）：探測、優先次序、復活Shizuku 指令。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(self.tmp, "jobs.json")
+        self.now = dt.datetime(2026, 1, 5, 10, 0)
+        # 清兩個快取，等 patch 實時生效
+        bot._RISH_CACHE.update(t=0.0, ok=False)
+        bot._ADB_CACHE.update(t=0.0, ok=False)
+
+    def tearDown(self):
+        bot.JOBS_PATH = self.old_j
+        bot._RISH_CACHE.update(t=0.0, ok=False)
+        bot._ADB_CACHE.update(t=0.0, ok=False)
+
+    def _ex(self, line):
+        return bot._execute_player(bot.parse_player(line), 12345, self.now)
+
+    def test_parse_revive(self):
+        for s in ("復活Shizuku", "重開shizuku", "救Shizuku", "Shizuku復活",
+                  "shizuku 救返"):
+            c = bot.parse_player(s)
+            self.assertIsNotNone(c, s)
+            self.assertEqual(c.action, "shizuku_revive", s)
+
+    def test_priv_exec_prefers_rish(self):
+        calls = []
+        with mock.patch.object(bot, "_rish_available", return_value=True), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=True), \
+             mock.patch.object(bot, "run_intent",
+                               side_effect=lambda c: (calls.append(c), (True, "rish-ok"))[1]), \
+             mock.patch.object(bot, "_adb_shell", return_value=(True, "adb-ok")):
+            ok, out = bot._shell_priv_exec("echo hi")
+        self.assertTrue(ok)
+        self.assertEqual(out, "rish-ok")
+        self.assertEqual(calls[0][:2], ["rish", "-c"])
+
+    def test_priv_exec_falls_back_to_adb(self):
+        with mock.patch.object(bot, "_rish_available", return_value=False), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=True), \
+             mock.patch.object(bot, "_adb_shell", return_value=(True, "adb-ok")) as m:
+            ok, out = bot._shell_priv_exec("echo hi")
+        self.assertEqual((ok, out), (True, "adb-ok"))
+        m.assert_called_once_with("echo hi")
+
+    def test_priv_exec_both_down(self):
+        with mock.patch.object(bot, "_rish_available", return_value=False), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=False):
+            ok, out = bot._shell_priv_exec("echo hi")
+        self.assertFalse(ok)
+        self.assertIn("都唔喺度", out)
+
+    def test_revive_already_alive(self):
+        with mock.patch.object(bot, "_rish_available", return_value=True):
+            self.assertIn("行緊", self._ex("復活Shizuku"))
+
+    def test_revive_no_lane(self):
+        with mock.patch.object(bot, "_rish_available", return_value=False), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=False):
+            self.assertIn("救唔到", self._ex("復活Shizuku"))
+
+    def test_revive_success(self):
+        states = iter([False, True])  # 初探死 → 行完 start.sh 復活
+        with mock.patch.object(bot, "_rish_available",
+                               side_effect=lambda: next(states, True)), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=True), \
+             mock.patch.object(bot, "_adb_shell", return_value=(True, "ok")):
+            self.assertIn("復活咗", self._ex("復活Shizuku"))
+
+    def test_revive_start_script_missing(self):
+        with mock.patch.object(bot, "_rish_available", return_value=False), \
+             mock.patch.object(bot, "_adb_lane_available", return_value=True), \
+             mock.patch.object(bot, "_adb_shell",
+                               return_value=(False, "No such file")):
+            self.assertIn("start.sh 行唔到", self._ex("復活Shizuku"))
+
+    def test_lane_probe_uses_uid2000(self):
+        with mock.patch.object(bot.shutil, "which", return_value="/usr/bin/adb"), \
+             mock.patch.object(bot.subprocess, "run") as run:
+            run.return_value = mock.Mock(returncode=0,
+                                         stdout="uid=2000(shell)", stderr="")
+            self.assertTrue(bot._adb_lane_probe())
+            args = run.call_args_list[0][0][0]
+            self.assertIn(bot.ADB_TARGET, args)
+            self.assertIn("shell", args)
 
 
 class TestSelfcheck(unittest.TestCase):

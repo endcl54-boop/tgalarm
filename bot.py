@@ -480,6 +480,8 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.fullmatch(r"(?:修復|保障|權限|fix)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("protect")
+    if re.fullmatch(r"(?:復活|重開|救)\s*shizuku|shizuku\s*(?:復活|重開|救返)", s, re.IGNORECASE):
+        return PlayerCmd("shizuku_revive")
     # 時間分配：[每日] hhmm至hhmm 分配 [留空N% 或 留空N分鐘] 項目[x比例]…
     m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(%|分鐘|分钟|分)\s*)?(.+)", s, re.IGNORECASE)
     if m:
@@ -710,6 +712,68 @@ def _rish_available() -> bool:
     return _RISH_CACHE["ok"]
 
 
+# ---- ADB lane：Termux 自攜 adb（第三條 uid 2000 通道）----
+# adbd tcpip 模式喺 127.0.0.1:5555 已授權（免配對）；呢條路唔使 Shizuku，
+# rish 死咗（電話重啟／Shizuku 俾人殺）都可以照樣用 shell 身份發 intent。
+ADB_TARGET = "127.0.0.1:5555"
+_ADB_CACHE = {"t": 0.0, "ok": False}
+_ADB_TTL = 600.0
+
+
+def _adb_shell(shell_cmd: str, timeout: int = 10) -> tuple:
+    """經 adb lane 行 shell 指令；回傳 (ok, 輸出)。"""
+    adb = shutil.which("adb")
+    if not adb:
+        return False, "搵唔到 adb 指令（pkg install android-tools）"
+    try:
+        r = subprocess.run([adb, "-s", ADB_TARGET, "shell", shell_cmd],
+                           capture_output=True, text=True, timeout=timeout)
+        out = (r.stdout + r.stderr).strip()
+        return r.returncode == 0, out
+    except subprocess.TimeoutExpired:
+        return False, "adb shell 超時"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _adb_lane_probe() -> bool:
+    """真實探測：行到 id 攞到 uid=2000 先算；斷咗會試重連一次。"""
+    adb = shutil.which("adb")
+    if not adb:
+        return False
+    ok, out = _adb_shell("id")
+    if ok and "uid=2000" in out:
+        return True
+    try:
+        subprocess.run([adb, "connect", ADB_TARGET], capture_output=True,
+                       text=True, timeout=8)
+    except Exception:  # noqa: BLE001
+        pass
+    ok, out = _adb_shell("id")
+    return ok and "uid=2000" in out
+
+
+def _adb_lane_available() -> bool:
+    now = dt.datetime.now().timestamp()
+    if now - _ADB_CACHE["t"] < _ADB_TTL:
+        return _ADB_CACHE["ok"]
+    _ADB_CACHE["ok"] = _adb_lane_probe()
+    _ADB_CACHE["t"] = now
+    return _ADB_CACHE["ok"]
+
+
+def _shell_priv_exec(cmd_str: str) -> tuple:
+    """統一嘅 uid 2000 執行：rish（Shizuku）優先，死咗用 adb lane。
+    回傳 (ok, 輸出)；兩條都冇 → (False, 原因)。"""
+    if _rish_available():
+        ok, out = run_intent(["rish", "-c", cmd_str])
+        if ok:
+            return ok, out
+    if _adb_lane_available():
+        return _adb_shell(cmd_str)
+    return False, "rish 同 adb lane 都唔喺度"
+
+
 def _open_nav(dest: str, mode: str = "r") -> tuple:
     """開 Google Maps 導航，rish（Shizuku/adb shell）優先，三重後備：
     ⓪ rish＋喚醒螢幕（vivo/小米 背景閘剋星；有 Shizuku 一定行呢步）
@@ -722,13 +786,13 @@ def _open_nav(dest: str, mode: str = "r") -> tuple:
     else:
         uri = f"google.navigation:q={urllib.parse.quote(dest)}&mode={mode}"
     base = ["am", "start", "-a", "android.intent.action.VIEW", "-d", uri]
-    if _rish_available():
-        ok, out = run_intent(["rish", "-c",
-                              "input keyevent KEYCODE_WAKEUP; " + shlex.join(base)])
+    if _rish_available() or _adb_lane_available():
+        ok, out = _shell_priv_exec(
+            "input keyevent KEYCODE_WAKEUP; " + shlex.join(base))
         if ok:
-            log.info("導航已經 rish（adb shell 身份）發出")
+            log.info("導航已經 uid2000 通道（rish/adb lane）發出")
             return ok, out
-        log.info("rish 發送失敗，轉返普通 am：%s", out[:120])
+        log.info("uid2000 通道發送失敗，轉返普通 am：%s", out[:120])
     ok, out = run_intent(base)
     if ok:
         return ok, out
@@ -1841,6 +1905,22 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                 "　• vivo/Funtouch：要開「後台彈出界面」（設定→應用與權限→權限管理→其他權限）\n"
                 "　• 其他機：「喺其他應用上層顯示」要開\n"
                 "（試埋熄螢幕等，最似你半夜放工狀態）")
+    if a == "shizuku_revive":
+        if _rish_available():
+            return "✅ Shizuku 本來就行緊（rish 探到 uid=2000），唔使救。"
+        if not _adb_lane_available():
+            return ("❌ adb lane（127.0.0.1:5555）都唔喺度，救唔到。\n"
+                    "手動救：開 Shizuku app →「透過無線調試啟動」，跟個 dialog 配對一次。")
+        ok, out = _adb_shell("sh /sdcard/Android/data/"
+                             "moe.shizuku.privileged.api/start.sh", timeout=30)
+        _RISH_CACHE["t"], _RISH_CACHE["ok"] = 0.0, False   # 清快取，真探一單
+        if _rish_available():
+            return "✅ Shizuku 復活咗！rish 探返到 uid=2000。"
+        if not ok:
+            return (f"⚠️ start.sh 行唔到：{out[:90]}\n"
+                    "開一次 Shizuku app 嘅「無線調試」頁等佢寫返個 start.sh，再 send「復活Shizuku」。")
+        return (f"ℹ️ start.sh 有行（{out[:60]}）但 rish 仲未探到。\n"
+                "開一次 Shizuku app 睇下狀態，唔得再 send「復活Shizuku」。")
     if a == "protect":
         run_intent(["am", "start", "-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
                     "-d", "package:com.termux"])
