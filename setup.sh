@@ -1,3 +1,36 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+# tgalarm 一鍵安裝（Termux 專用，零手動設定）
+#
+# 用法：bash setup.sh
+#   自動做晒：裝 Python + 依賴 → 問你一次 Bot token（之後唔使再入）
+#   → 安放 bot.py → 設開機自啟 + wake-lock → 即刻起動 bot
+#
+# 重跑安全：已有 token 會保留。
+# 換 token：TG_TOKEN="新token" bash setup.sh（連問都唔問，全自動）
+# ============================================================
+set -e
+
+BOT_DIR="$HOME/telegram-alarm-bot"
+CONFIG_DIR="$HOME/.tgalarm"
+CONFIG="$CONFIG_DIR/config"
+
+echo "🤖 tgalarm 安裝開始…（全程約 3–5 分鐘，主要係下載時間）"
+echo ""
+
+echo "==> [1/6] 更新套件 + 安裝 Python"
+pkg update -y >/dev/null
+pkg install -y python >/dev/null
+
+echo "==> [2/6] 安裝 python-telegram-bot"
+# 注意：Termux 禁止 `pip install --upgrade pip`（會整爛 python-pip 套件）
+# pip 本身由 pkg 管理，呢度淨係裝依賴
+pkg install -y python-pip >/dev/null 2>&1 || true
+python -m pip install --quiet 'python-telegram-bot>=21.0,<24.0'
+
+echo "==> [3/6] 安放 bot.py → $BOT_DIR"
+mkdir -p "$BOT_DIR" "$CONFIG_DIR"
+cat > "$BOT_DIR/bot.py" <<'PYEOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -211,14 +244,6 @@ def _read_hhmm_of(tok: str):
     if hh > 23 or mm > 59:
         return None
     return hh, mm
-
-
-def _read_start_tok(tok: str):
-    """分配開始時間：「現在／而家／now」＝即刻上車（用而家時間），否則當 hhmm 讀。"""
-    if re.fullmatch(r"現在|而家|now", tok, re.IGNORECASE):
-        n = dt.datetime.now()
-        return n.hour, n.minute
-    return _read_hhmm_of(tok)
 
 
 def _read_hhmm(rest: str):
@@ -471,7 +496,7 @@ def parse_player(text: str) -> PlayerCmd | None:
     # 時間分配：[每日] hhmm至hhmm 分配 [留空N%] 項目[x比例]…
     m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
     if m:
-        r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
+        r1, r2 = _read_hhmm_of(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
             return PlayerCmd("sched_alloc_daily", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
@@ -479,7 +504,7 @@ def parse_player(text: str) -> PlayerCmd | None:
         return None
     m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
     if m:
-        r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
+        r1, r2 = _read_hhmm_of(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
             return PlayerCmd("sched_alloc", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
@@ -1400,10 +1425,11 @@ async def _fire_alloc(job: dict) -> None:
     keep = True
     if idx + 1 < len(segs):
         job["idx"] = idx + 1
-        # 正常到點：跟足開初嘅靜態分段推移，唔好 reflow——
-        # 「提早完成慳時間」嘅重排只屬於 send「完成」嗰下（alloc_advance 自己會做）。
-        # 咁樣 fire 鏈先至唔會每段被雙倍留空吸慢。
-        job["next"] = (fired_at + dt.timedelta(seconds=secs)).isoformat()
+        if _alloc_reflow(job, now, job["idx"]):
+            job["next"] = (now + dt.timedelta(
+                seconds=segs[job["idx"]]["seconds"])).isoformat()   # 動態吸漂移
+        else:
+            job["next"] = (fired_at + dt.timedelta(seconds=secs)).isoformat()
     elif job.get("daily"):
         job["idx"] = 0
         job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
@@ -2028,3 +2054,64 @@ def main():
 
 if __name__ == "__main__":
     main()
+PYEOF
+
+echo "==> [4/6] 設定 Bot token"
+if [ -n "$TG_TOKEN" ]; then
+  printf 'BOT_TOKEN=%s\n' "$TG_TOKEN" > "$CONFIG.tmp"
+  grep -v '^BOT_TOKEN=' "$CONFIG" 2>/dev/null >> "$CONFIG.tmp" || true
+  mv "$CONFIG.tmp" "$CONFIG"
+  echo "    已用 TG_TOKEN 環境變數寫入 token"
+elif grep -q '^BOT_TOKEN=...' "$CONFIG" 2>/dev/null; then
+  echo "    已有 token（$CONFIG），保留，跳過"
+else
+  echo ""
+  echo "    👉 未設定過 token。請去 Telegram 搵 @BotFather → 輸入 /newbot → 跟指示改名 → 複製 token"
+  while true; do
+    read -r -p "    喺度貼上 token，然後撳 Enter: " t
+    if printf '%s' "$t" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; then
+      printf 'BOT_TOKEN=%s\n' "$t" > "$CONFIG.tmp"
+      grep -v '^BOT_TOKEN=' "$CONFIG" 2>/dev/null >> "$CONFIG.tmp" || true
+      mv "$CONFIG.tmp" "$CONFIG"
+      break
+    fi
+    echo "    ⚠️ 格式唔似喎（應該係 123456789:AAxx 咁嘅樣），再試一次："
+  done
+fi
+chmod 600 "$CONFIG" 2>/dev/null || true
+
+echo "==> [5/6] 設開機自啟腳本（Termux:Boot 用）+ 攞 wake-lock"
+mkdir -p "$HOME/.termux/boot"
+cat > "$HOME/.termux/boot/start-tgalarm.sh" <<'BOOTEOF'
+#!/data/data/com.termux/files/usr/bin/sh
+termux-wake-lock
+cd "$HOME/telegram-alarm-bot" || exit 1
+nohup python bot.py >> "$HOME/tgalarm.log" 2>&1 &
+BOOTEOF
+chmod +x "$HOME/.termux/boot/start-tgalarm.sh"
+termux-wake-lock 2>/dev/null || true
+
+echo "==> [6/6] 起動 bot（背景長駐）"
+pkill -f "bot.py" 2>/dev/null || true
+sleep 1
+cd "$BOT_DIR"
+nohup python bot.py >> "$HOME/tgalarm.log" 2>&1 &
+sleep 4
+
+echo ""
+if pgrep -f "bot.py" >/dev/null; then
+  echo "🎉 搞掂！bot 已經喺背景行緊。跟住淨係做呢兩步："
+  echo ""
+  echo "   1) Telegram 開你隻 bot → send /start"
+  echo "      （佢會自動綁定你做擁有者，唔使你查 chat_id）"
+  echo "   2) send「計時 1分鐘」→ 系統時鐘應該即刻開始倒數 🎊"
+  echo ""
+  echo "📝 備註："
+  echo "   ・重開機自動行：裝 Termux:Boot app 兼手動開佢一次（腳本已經放喺 ~/.termux/boot/）"
+  echo "   ・熄屏唔斷線：手機設定 → 應用 → Termux → 電池 → 無限制"
+  echo "   ・睇 log：tail -f ~/tgalarm.log　　停 bot：pkill -f bot.py　　重開：bash setup.sh"
+else
+  echo "⚠️ bot 起唔到。貼呢段 log 俾我："
+  tail -20 "$HOME/tgalarm.log" 2>/dev/null
+  exit 1
+fi
