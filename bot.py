@@ -559,12 +559,15 @@ def run_intent(cmd: list) -> tuple:
         log.info("DRY_RUN: %s", shlex.join(cmd))
         return True, "DRY_RUN " + shlex.join(cmd)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         out = (r.stdout + r.stderr).strip()
         ok = r.returncode == 0 and "Error" not in out
         if not ok:
             log.warning("intent 失敗 rc=%s: %s", r.returncode, out)
         return ok, out
+    except subprocess.TimeoutExpired:
+        # 電話 load 高嗰陣 am 起身慢；唔使成段 command 嚇人
+        return False, "系統開時鐘 App 超時（電話太攰），請再試一次"
     except FileNotFoundError:
         return False, "搵唔到 `am` 指令 —— 呢個 bot 要喺 Android Termux 行"
     except Exception as e:  # noqa: BLE001
@@ -658,13 +661,26 @@ def _nav_target(arg: str) -> tuple:
 
 
 def _open_nav(dest: str, mode: str = "r") -> tuple:
-    """開 Google Maps 導航。純文字→google.navigation:q=…；連結/geo URI→直接開。"""
+    """開 Google Maps 導航，三重後備：
+    ① google.navigation VIEW（首選）② MapsActivity 明部件開 https dir
+    ③ https dir 交畀系統揀 app（Maps 有事嗰啲手機可以用瀏覽器檔）。
+    純文字→google.navigation:q=…；連結/geo URI→直接開。"""
     import urllib.parse
     if re.match(r"^(https?:|geo:|google\.)", dest, re.IGNORECASE):
         uri = dest
     else:
         uri = f"google.navigation:q={urllib.parse.quote(dest)}&mode={mode}"
-    return run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", uri])
+    ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", uri])
+    if ok:
+        return ok, out
+    tmode = {"r": "transit", "w": "walking", "d": "driving"}.get(mode, "transit")
+    web = (f"https://www.google.com/maps/dir/?api=1&destination="
+           f"{urllib.parse.quote(dest)}&travelmode={tmode}")
+    ok, out = run_intent(["am", "start", "-n",
+                          "com.google.android.apps.maps/.MapsActivity", "-d", web])
+    if ok:
+        return ok, out
+    return run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", web])
 
 
 def _fmt_dests() -> str:
@@ -1136,7 +1152,7 @@ def _alloc_segments(items_text: str, buf_pct: int, total_sec: int) -> tuple:
         else:
             secs = int(avail * w / W) // 60 * 60
             used += secs
-        segs.append({"text": name, "seconds": secs})
+        segs.append({"text": name, "seconds": secs, "w": w})
     return segs, None
 
 
@@ -1165,7 +1181,8 @@ def _alloc_ff(now: dt.datetime, hh: int, mm: int, hh2: int, mm2: int,
 
 
 def _add_alloc_job(chat_id: int, now: dt.datetime, hh: int, mm: int,
-                   hh2: int, mm2: int, daily: bool, segments: list) -> tuple:
+                   hh2: int, mm2: int, daily: bool, segments: list,
+                   buf: int = 0) -> tuple:
     """新增分配排程；同時間嘅舊分配排程會被取代。
     如果而家已經喺起止時間窗內 → 即刻開飛（fast-forward），唔會推去下一轉。"""
     jobs = _jobs()
@@ -1186,7 +1203,7 @@ def _add_alloc_job(chat_id: int, now: dt.datetime, hh: int, mm: int,
            "daily": daily, "url": "", "seconds": 0, "mode": "",
            "label": "時間分配", "chat_id": chat_id,
            "next": start_at.isoformat(), "shuffle": False, "paused": False,
-           "segments": segments, "idx": idx0 or 0}
+           "segments": segments, "idx": idx0 or 0, "buf": buf}
     if idx0 is not None and first_rem < segments[idx0]["seconds"]:
         job["_rem"] = first_rem  # 半路加入：第一下計時用淨返嘅秒數（一次性）
     jobs.append(job)
@@ -1213,6 +1230,42 @@ def _alloc_breakdown(job: dict) -> str:
     return "\n".join(lines)
 
 
+def _alloc_remaining_end(job: dict, now: dt.datetime) -> dt.datetime:
+    """進行中 block 嘅結束時間（由 hh:mm → hh2:mm2 推，跨日自動 +1 天）。"""
+    s0 = now.replace(hour=job["hh"], minute=job["mm"], second=0, microsecond=0)
+    if s0 > now:
+        s0 -= dt.timedelta(days=1)
+    e0 = s0.replace(hour=job["hh2"], minute=job["mm2"])
+    if e0 <= s0:
+        e0 += dt.timedelta(days=1)
+    return e0
+
+
+def _alloc_reflow(job: dict, now: dt.datetime, from_idx: int) -> bool:
+    """動態數值核心：將剩餘段按權重重新劈（剩牋_block_end − 而家 − 留空%）。
+    提早完成慳到嘅時間跌入到埋嘅段，收工時間照舊唔變。
+    剩餘唔夠每段 1 分鐘 → False（交返靜態秒數繼續行）。"""
+    segs = job.get("segments", [])
+    rem_segs = segs[from_idx:]
+    if not rem_segs:
+        return False
+    R = (_alloc_remaining_end(job, now) - now).total_seconds()
+    buf = job.get("buf", 0)
+    avail = int(R * (100 - buf) / 100) // 60 * 60
+    if avail < 60 * len(rem_segs):
+        return False
+    W = sum(s.get("w", 1.0) for s in rem_segs)
+    used = 0
+    for i, s in enumerate(rem_segs):
+        if i == len(rem_segs) - 1:
+            secs = avail - used
+        else:
+            secs = int(avail * s.get("w", 1.0) / W) // 60 * 60
+            used += secs
+        s["seconds"] = secs
+    return True
+
+
 def _alloc_advance(chat_id: int, now: dt.datetime) -> str:
     """「完成」：提早做完而家呢段 → 立刻快進下一階段。
     找緊進行中嘅分配（idx>=1 表示第一下已 fire；next 係呢段尾）。
@@ -1235,13 +1288,20 @@ def _alloc_advance(chat_id: int, now: dt.datetime) -> str:
     if t:
         t.cancel()
     if idx < len(segs):                      # 仲有下一段 → 即刻 fire 佢
+        reflowed = _alloc_reflow(job, now, idx)   # 慳返嘅時間動態跌入剩餘段
         nxt = segs[idx]
         job["next"] = now.isoformat()
         _save_json(JOBS_PATH, jobs)          # job 已喺 jobs list 內（引用）
         _arm(job)
-        return (f"⏩ 提早完成「{cur['text']}」（慳返 {saved}）\n"
-                f"→ 即刻開第 {idx + 1}/{len(segs)} 項「{nxt['text']}」🚀\n"
-                f"（時鐘 App 嘅舊倒計時會照響，撳停就得）")
+        head = f"⏩ 提早完成「{cur['text']}」（慳返 {saved}）\n"
+        if reflowed:
+            end = _alloc_remaining_end(job, now)
+            head += (f"→ 剩餘按權重動態重排（照舊 {end:%H:%M} 收工）：\n"
+                     f"{_alloc_breakdown(job)} 🚀 馬上開始\n")
+        else:
+            head += f"→ 即刻開第 {idx + 1}/{len(segs)} 項「{nxt['text']}」🚀\n"
+        head += "（時鐘 App 嘅舊倒計時會照響，撳停就得）"
+        return head
     # 最後一段都做埋 → 提早收工
     jobs2 = [j for j in jobs if j["id"] != job["id"]]
     if job.get("daily"):
@@ -1285,7 +1345,11 @@ async def _fire_alloc(job: dict) -> None:
     keep = True
     if idx + 1 < len(segs):
         job["idx"] = idx + 1
-        job["next"] = (fired_at + dt.timedelta(seconds=secs)).isoformat()
+        if _alloc_reflow(job, now, job["idx"]):
+            job["next"] = (now + dt.timedelta(
+                seconds=segs[job["idx"]]["seconds"])).isoformat()   # 動態吸漂移
+        else:
+            job["next"] = (fired_at + dt.timedelta(seconds=secs)).isoformat()
     elif job.get("daily"):
         job["idx"] = 0
         job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
@@ -1676,7 +1740,7 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         if segs is None:
             return "❓ " + err
         job, replaced = _add_alloc_job(chat_id, now, cmd.hour, cmd.minute,
-                                       cmd.hour2, cmd.minute2, daily, segs)
+                                       cmd.hour2, cmd.minute2, daily, segs, cmd.buf)
         kind = "每日" if daily else "一次"
         av = total - sum(s2["seconds"] for s2 in segs)
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
@@ -1699,12 +1763,14 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     if a == "protect":
         run_intent(["am", "start", "-a", "android.settings.APPLICATION_DETAILS_SETTINGS",
                     "-d", "package:com.termux"])
+        run_intent(["am", "start", "-a", "android.settings.action.MANAGE_OVERLAY_PERMISSION",
+                    "-d", "package:com.termux"])
         run_intent(["am", "start", "-a", "android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS"])
         return ("🔧 已幫你彈出設定頁，逐項撥好（解決深夜遲響/唔響）：\n"
                 "① 電池 → 揀「無限制」（Termux 唔被省電壓，最緊要）\n"
                 "② 通知 → 允許（冇常駐通知 → 系統易殺、wakelock 失效）\n"
                 "③ 喺其他應用上層顯示 → 允許（鎖屏彈計時器/導航要用）\n"
-                "④〔小米/華為/OPPO 專用〕自啟動、後台活動 → 允許\n"
+                "④〔小米/華為/OPPO 專用〕自啟動、後台活動、彈出視窗（後台彈出界面）→ 允許\n"
                 "撥好之後 send「自檢」+ 熄螢幕 3 分鐘驗證一次")
     if a == "jobs":
         return _fmt_jobs(now)
