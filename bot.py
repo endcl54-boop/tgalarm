@@ -138,7 +138,7 @@ HELP = (
     "・完成 2　・未做 2　・刪 2　・清除已完成\n"
     "🧩 時間分配（到點自動連環計時）：\n"
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
-    "・加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
+    "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
     "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
@@ -388,6 +388,7 @@ class PlayerCmd:
     hour2: int | None = None    # sched_alloc：結束時間
     minute2: int | None = None
     buf: int = 0                # sched_alloc：留空百分比
+    buf_min: int = 0            # sched_alloc：留空分鐘（同 buf 二擇一）
 
 
 def _strip_shuffle(ref: str) -> tuple:
@@ -396,6 +397,17 @@ def _strip_shuffle(ref: str) -> tuple:
     if m:
         return ref[:m.start()].strip(), True
     return ref.strip(), False
+
+
+def _alloc_buf(num: str | None, unit: str | None) -> tuple:
+    """留空選項：回傳 (百分比, 分鐘)。冇寫 → (0, 0)；% 同分鐘二擇一。
+    1.5分鐘呢類小數會向下對齊成整分鐘（最少 0）。"""
+    if not num or not unit:
+        return 0, 0
+    val = float(num)
+    if unit == "%":
+        return int(val), 0
+    return 0, int(val)
 
 
 def parse_player(text: str) -> PlayerCmd | None:
@@ -468,22 +480,24 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.fullmatch(r"(?:修復|保障|權限|fix)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("protect")
-    # 時間分配：[每日] hhmm至hhmm 分配 [留空N%] 項目[x比例]…
-    m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
+    # 時間分配：[每日] hhmm至hhmm 分配 [留空N% 或 留空N分鐘] 項目[x比例]…
+    m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(%|分鐘|分钟|分)\s*)?(.+)", s, re.IGNORECASE)
     if m:
         r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
+            b_pct, b_min = _alloc_buf(m.group(3), m.group(4))
             return PlayerCmd("sched_alloc_daily", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
-                             buf=int(m.group(3) or 0), ref=m.group(4).strip())
+                             buf=b_pct, buf_min=b_min, ref=m.group(5).strip())
         return None
-    m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+(?:\.\d+)?)\s*(%|分鐘|分钟|分)\s*)?(.+)", s, re.IGNORECASE)
     if m:
         r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
+            b_pct, b_min = _alloc_buf(m.group(3), m.group(4))
             return PlayerCmd("sched_alloc", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
-                             buf=int(m.group(3) or 0), ref=m.group(4).strip())
+                             buf=b_pct, buf_min=b_min, ref=m.group(5).strip())
         return None
     # 每日 hhmm <計時 時長 | [隨機]播> [名/連結/標籤]
     m = re.match(r"^(?:每日|每天|everyday)\s*", s, re.IGNORECASE)
@@ -1180,8 +1194,10 @@ async def _fire_later(job: dict, delay: float) -> None:
         _TASKS.pop(job["id"], None)
 
 
-def _alloc_segments(items_text: str, buf_pct: int, total_sec: int) -> tuple:
-    """按 留空% + 加權 切時間。回傳 (segments, 錯誤訊息)；segments=[{"text","seconds"}, …]。
+def _alloc_segments(items_text: str, buf_pct: int, total_sec: int,
+                    buf_min: int = 0) -> tuple:
+    """按 留空%／留空分鐘 + 加權 切時間。回傳 (segments, 錯誤訊息)；
+    segments=[{"text","seconds"}, …]。
     比例寫法：項目後面 x2 / ×2 / *2；冇就當 1。最後一項食埋剩尾秒數，總和啱啱好。"""
     parts = [p.strip() for p in re.split(r"[、，,／/；;]+", items_text) if p.strip()]
     if not parts:
@@ -1196,9 +1212,10 @@ def _alloc_segments(items_text: str, buf_pct: int, total_sec: int) -> tuple:
         else:
             name, w = p, 1.0
         items.append((name, w))
-    avail = int(total_sec * (100 - buf_pct) / 100) // 60 * 60  # 對齊分鐘
+    avail = (int(total_sec * (100 - buf_pct) / 100) - buf_min * 60) // 60 * 60  # 對齊分鐘
     if avail < 60 * len(items):
-        return None, f"留空 {buf_pct}% 之後得 {fmt_duration(avail)}，唔夠分畀 {len(parts)} 項（每項至少 1 分鐘）"
+        why = f"留空 {buf_pct}%" if buf_pct else f"留空 {buf_min}分鐘"
+        return None, f"{why} 之後得 {fmt_duration(avail)}，唔夠分畀 {len(parts)} 項（每項至少 1 分鐘）"
     W = sum(w for _, w in items)
     segs, used = [], 0
     for i, (name, w) in enumerate(items):
@@ -1237,7 +1254,7 @@ def _alloc_ff(now: dt.datetime, hh: int, mm: int, hh2: int, mm2: int,
 
 def _add_alloc_job(chat_id: int, now: dt.datetime, hh: int, mm: int,
                    hh2: int, mm2: int, daily: bool, segments: list,
-                   buf: int = 0) -> tuple:
+                   buf: int = 0, buf_min: int = 0) -> tuple:
     """新增分配排程；同時間嘅舊分配排程會被取代。
     如果而家已經喺起止時間窗內 → 即刻開飛（fast-forward），唔會推去下一轉。"""
     jobs = _jobs()
@@ -1258,7 +1275,7 @@ def _add_alloc_job(chat_id: int, now: dt.datetime, hh: int, mm: int,
            "daily": daily, "url": "", "seconds": 0, "mode": "",
            "label": "時間分配", "chat_id": chat_id,
            "next": start_at.isoformat(), "shuffle": False, "paused": False,
-           "segments": segments, "idx": idx0 or 0, "buf": buf}
+           "segments": segments, "idx": idx0 or 0, "buf": buf, "buf_min": buf_min}
     if idx0 is not None and first_rem < segments[idx0]["seconds"]:
         job["_rem"] = first_rem  # 半路加入：第一下計時用淨返嘅秒數（一次性）
     jobs.append(job)
@@ -1297,7 +1314,7 @@ def _alloc_remaining_end(job: dict, now: dt.datetime) -> dt.datetime:
 
 
 def _alloc_reflow(job: dict, now: dt.datetime, from_idx: int) -> bool:
-    """動態數值核心：將剩餘段按權重重新劈（剩牋_block_end − 而家 − 留空%）。
+    """動態數值核心：將剩餘段按權重重新劈（剩牋_block_end − 而家 − 留空%／留空分鐘）。
     提早完成慳到嘅時間跌入到埋嘅段，收工時間照舊唔變。
     剩餘唔夠每段 1 分鐘 → False（交返靜態秒數繼續行）。"""
     segs = job.get("segments", [])
@@ -1306,7 +1323,8 @@ def _alloc_reflow(job: dict, now: dt.datetime, from_idx: int) -> bool:
         return False
     R = (_alloc_remaining_end(job, now) - now).total_seconds()
     buf = job.get("buf", 0)
-    avail = int(R * (100 - buf) / 100) // 60 * 60
+    buf_min = job.get("buf_min", 0)
+    avail = (int(R * (100 - buf) / 100) - buf_min * 60) // 60 * 60
     if avail < 60 * len(rem_segs):
         return False
     W = sum(s.get("w", 1.0) for s in rem_segs)
@@ -1790,16 +1808,23 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         if e0 <= s0:
             e0 += dt.timedelta(days=1)  # 過夜（例如 2200-0200）
         total = int((e0 - s0).total_seconds())
-        segs, err = _alloc_segments(cmd.ref, cmd.buf, total)
+        if cmd.buf_min * 60 > total - 60:
+            return f"❓ 留空 {cmd.buf_min}分鐘太多——個 window 先得 {fmt_duration(total)}"
+        segs, err = _alloc_segments(cmd.ref, cmd.buf, total, cmd.buf_min)
         if segs is None:
             return "❓ " + err
         job, replaced = _add_alloc_job(chat_id, now, cmd.hour, cmd.minute,
-                                       cmd.hour2, cmd.minute2, daily, segs, cmd.buf)
+                                       cmd.hour2, cmd.minute2, daily, segs,
+                                       cmd.buf, cmd.buf_min)
         kind = "每日" if daily else "一次"
         av = total - sum(s2["seconds"] for s2 in segs)
+        if cmd.buf_min:
+            buf_label = f"留空 {cmd.buf_min}分鐘"
+        else:
+            buf_label = f"留空 {cmd.buf}%"
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
         lines = [f"🧩 時間分配（{kind} #{job['id']}）：{when}→{cmd.hour2:02d}:{cmd.minute2:02d}"
-                 f"（{fmt_duration(total)}・留空 {cmd.buf}%＝{fmt_duration(av)}隨你用）",
+                 f"（{fmt_duration(total)}・{buf_label}＝{fmt_duration(av)}隨你用）",
                  _alloc_breakdown(job)]
         return "\n".join(lines) + _replaced_note(replaced)
     if a == "selfcheck":

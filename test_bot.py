@@ -1131,6 +1131,68 @@ class TestAlloc(unittest.TestCase):
         self.assertEqual([s["seconds"] for s in segs], [60, 60, 60, 60, 240])
 
 
+class TestAllocBufMinutes(unittest.TestCase):
+    """留空可選寫分鐘（留空30分鐘）：文法、切分、執行、reflow。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(self.tmp, "jobs.json")
+        self.now = dt.datetime(2026, 1, 5, 10, 0)
+
+    def tearDown(self):
+        bot.JOBS_PATH = self.old_j
+
+    def _p(self, s):
+        return bot.parse_player(s)
+
+    def _ex(self, line):
+        return bot._execute_player(bot.parse_player(line), 12345, self.now)
+
+    def test_parse_units(self):
+        for txt, mins in (("1900-2200 分配 留空30分鐘 A、B", 30),
+                          ("1900-2200 分配 留空30分钟 A、B", 30),
+                          ("1900-2200 分配 留空 45 分 A、B", 45)):
+            c = self._p(txt)
+            self.assertEqual(c.action, "sched_alloc")
+            self.assertEqual((c.buf, c.buf_min), (0, mins))
+            self.assertEqual(c.ref, "A、B")
+        c = self._p("每日 1900-2200 分配 留空20分鐘 A")
+        self.assertEqual((c.action, c.buf_min), ("sched_alloc_daily", 20))
+        # 冇寫留空 → 兩者皆 0（同舊行為）
+        c = self._p("1900-2200 分配 A、B")
+        self.assertEqual((c.buf, c.buf_min), (0, 0))
+
+    def test_segments_math(self):
+        # 1900-2200 = 10800s；留空30分鐘 → 9000s 均分兩段
+        segs, err = bot._alloc_segments("A、B", 0, 10800, 30)
+        self.assertIsNone(err)
+        self.assertEqual([s["seconds"] for s in segs], [4500, 4500])
+        # 加權照行：9000s 按 2:1 → 6000/3000
+        segs, err = bot._alloc_segments("Ax2、B", 0, 10800, 30)
+        self.assertEqual([s["seconds"] for s in segs], [6000, 3000])
+
+    def test_execute_and_persist(self):
+        r = self._ex("1900至2200 分配 留空30分鐘 A、B")
+        self.assertIn("🧩 時間分配", r)
+        self.assertIn("留空 30分鐘", r)
+        self.assertIn("A — 1小時15分鐘（19:00→20:15）", r)
+        self.assertIn("B — 1小時15分鐘（20:15→21:30）", r)
+        job = bot._load_json(bot.JOBS_PATH, [])[0]
+        self.assertEqual((job["buf"], job["buf_min"]), (0, 30))
+
+    def test_buf_minutes_too_big(self):
+        self.assertIn("太多", self._ex("1900-1905 分配 留空10分鐘 A"))
+
+    def test_reflow_keeps_buf_min(self):
+        # block 1930-2130，19:30 reflow，留空30分鐘 → 剩 90 分可用
+        j = {"hh": 19, "mm": 30, "hh2": 21, "mm2": 30, "buf": 0, "buf_min": 30,
+             "segments": [{"text": "a", "seconds": 1200, "w": 1},
+                          {"text": "b", "seconds": 600, "w": 1}], "idx": 1}
+        self.assertTrue(bot._alloc_reflow(j, dt.datetime(2026, 1, 5, 19, 30), 1))
+        self.assertEqual(j["segments"][1]["seconds"], 90 * 60)
+
+
 class TestSelfcheck(unittest.TestCase):
     """自檢 + 背景啟動限制檢測"""
 
