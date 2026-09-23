@@ -774,6 +774,63 @@ def _shell_priv_exec(cmd_str: str) -> tuple:
     return False, "rish 同 adb lane 都唔喺度"
 
 
+def _nav_uri(dest: str, mode: str = "r") -> str:
+    """導航 URI：純文字→google.navigation:q=…；連結/geo 直接用。"""
+    import urllib.parse
+    if re.match(r"^(https?:|geo:|google\.)", dest, re.IGNORECASE):
+        return dest
+    return f"google.navigation:q={urllib.parse.quote(dest)}&mode={mode}"
+
+
+# ---- 導航確認彈窗：到點先彈通知，撳「確定」先開地圖 ----
+# vivo 背景閘 + 鎖屏令「靜雞雞開 app」睇唔到；改做頭條通知＋確定掣，
+# 撳掣嗰下 Termux:API 有前台交互 → 地圖一定彈到。
+def _nav_confirm_notify(job: dict) -> tuple:
+    """發頭條通知「開導航去X？〔確定〕」；回傳 (ok, 輸出)。
+    確定掣行 ~/.tgalarm/nav_go_<id>.sh：adb lane 優先，死咗普通 am。"""
+    dest = job.get("url") or job.get("label", "")
+    mode = job.get("mode", "r")
+    uri = _nav_uri(dest, mode)
+    import urllib.parse
+    tmode = {"r": "transit", "w": "walking", "d": "driving"}.get(mode, "transit")
+    web = (f"https://www.google.com/maps/dir/?api=1&destination="
+           f"{urllib.parse.quote(dest)}&travelmode={tmode}")
+    home = os.path.expanduser("~")
+    script = os.path.join(os.path.dirname(JOBS_PATH), f"nav_go_{job.get('id', 0)}.sh")
+    adb = shutil.which("adb") or "/data/data/com.termux/files/usr/bin/adb"
+    with open(script, "w") as f:
+        f.write(f"""#!/system/bin/sh
+# bot 自動寫：撳「確定」開地圖（adb lane 優先）
+{adb} connect {ADB_TARGET} >/dev/null 2>&1
+if {adb} -s {ADB_TARGET} shell "input keyevent KEYCODE_WAKEUP; \\
+am start -a android.intent.action.VIEW -d '{uri}'" >/dev/null 2>&1; then
+  exit 0
+fi
+am start -a android.intent.action.VIEW -d '{uri}' >/dev/null 2>&1 \\
+ || am start -a android.intent.action.VIEW -d '{web}'
+""")
+    os.chmod(script, 0o700)
+    if not shutil.which("termux-notification"):
+        return False, "冇 termux-notification"
+    nid = f"nav{job.get('id', 0)}"
+    label = job.get("label") or dest
+    cmd = ["termux-notification",
+           "--id", nid,
+           "--title", "⏰ 到點！開導航？",
+           "--content", f"去「{label}」——撳【確定】開地圖",
+           "--priority", "high",
+           "--button1", "確定開地圖", "--button1-action", f"sh {script}",
+           "--button2", "唔使", "--button2-action", f"termux-notification-remove {nid}"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+        out = (r.stdout + r.stderr).strip()
+        return r.returncode == 0, out or "ok"
+    except subprocess.TimeoutExpired:
+        return False, "termux-notification 超時"
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def _open_nav(dest: str, mode: str = "r") -> tuple:
     """開 Google Maps 導航，rish（Shizuku/adb shell）優先，三重後備：
     ⓪ rish＋喚醒螢幕（vivo/小米 背景閘剋星；有 Shizuku 一定行呢步）
@@ -781,10 +838,7 @@ def _open_nav(dest: str, mode: str = "r") -> tuple:
     ③ https dir 交畀系統揀 app（Maps 有事嗰啲手機可以用瀏覽器檔）。
     純文字→google.navigation:q=…；連結/geo URI→直接開。"""
     import urllib.parse
-    if re.match(r"^(https?:|geo:|google\.)", dest, re.IGNORECASE):
-        uri = dest
-    else:
-        uri = f"google.navigation:q={urllib.parse.quote(dest)}&mode={mode}"
+    uri = _nav_uri(dest, mode)
     base = ["am", "start", "-a", "android.intent.action.VIEW", "-d", uri]
     if _rish_available() or _adb_lane_available():
         ok, out = _shell_priv_exec(
@@ -1224,16 +1278,26 @@ async def _fire_later(job: dict, delay: float) -> None:
         ok, info = run_intent(timer_intent_cmd(job["seconds"], job.get("label", "")))
         how = _fmt_job_content(job)
     elif jtype == "nav":
-        if shutil.which("rish") and not DRY_RUN:
-            # fire 前強制重探：你可能啱啱喺 Shizuku app 重啟咗 server，
-            # 唔好跟 10 分鐘 TTL 舊快取（每次 fire 至多探一次，JVM 開銷值得）
-            _RISH_CACHE["ok"] = _rish_probe()
-            _RISH_CACHE["t"] = now.timestamp()
-        ok, info = _open_nav(job.get("url") or job.get("label", ""), job.get("mode", "d"))
-        how = f"開導航去「{job.get('label') or job.get('url')}」"
-        if shutil.which("rish") and not _RISH_CACHE["ok"] and not DRY_RUN:
-            how += ("\n⚠️ 但 Shizuku server 冇行緊——導航彈唔出！"
-                    "入 Shizuku app 撳「啟動」，下次就會彈")
+        label = job.get("label") or job.get("url")
+        if not DRY_RUN:
+            _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 先著螢幕，頭條先彈到
+        ok, info = _nav_confirm_notify(job)
+        if ok:
+            how = f"開導航去「{label}」——頭條通知彈咗，撳【確定開地圖】先會開"
+        else:
+            # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
+            log.info("導航確認通知失敗，直接開：%s", info[:80])
+            if shutil.which("rish") and not DRY_RUN:
+                # fire 前強制重探：你可能啱啱喺 Shizuku app 重啟咗 server，
+                # 唔好跟 10 分鐘 TTL 舊快取（每次 fire 至多探一次，JVM 開銷值得）
+                _RISH_CACHE["ok"] = _rish_probe()
+                _RISH_CACHE["t"] = now.timestamp()
+            ok, info = _open_nav(job.get("url") or job.get("label", ""),
+                                 job.get("mode", "d"))
+            how = f"開導航去「{label}」（彈窗通知出唔到，直接開咗）"
+            if not _rish_available() and not _adb_lane_available() and not DRY_RUN:
+                how += ("\n⚠️ Shizuku 同 adb lane 都冇行——導航可能彈唔出！"
+                        "入 Shizuku app 撳「啟動」，或者 send「復活Shizuku」")
     else:
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"

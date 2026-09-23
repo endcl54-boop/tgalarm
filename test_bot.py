@@ -2015,6 +2015,9 @@ class TestNavFireRishWarning(unittest.TestCase):
         self._save = bot._save_json
         self._dry = bot.DRY_RUN
         self._sleep = asyncio.sleep
+        self._notify = bot._nav_confirm_notify
+        self._priv = bot._shell_priv_exec
+        self._adblane = bot._adb_lane_available
         async def fake_sleep(_):
             pass
         asyncio.sleep = fake_sleep
@@ -2030,6 +2033,9 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._save_json = self._save
         bot.DRY_RUN = self._dry
         asyncio.sleep = self._sleep
+        bot._nav_confirm_notify = self._notify
+        bot._shell_priv_exec = self._priv
+        bot._adb_lane_available = self._adblane
 
     def _job(self):
         nxt = (dt.datetime.now() + dt.timedelta(seconds=1)).isoformat()
@@ -2058,11 +2064,16 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._save_json = lambda *a, **k: None
         bot.run_intent = lambda cmd: (True, "")
         bot._RISH_CACHE.update({"t": 1e18, "ok": True})  # 舊 cache 話 ok，都要重探
+        # 新流程：通知彈窗先；呢度強制行後備直開路，驗證重探＋警告仍然喺度
+        bot._nav_confirm_notify = lambda job: (False, "冇 termux-notification")
+        bot._shell_priv_exec = lambda s: (True, "")
+        bot._adb_lane_available = lambda: False
         self._fire()
-        self.assertEqual(len(probes), 1)               # fire 前重探過
+        self.assertEqual(len(probes), 1)               # fallback 前重探過
         self.assertFalse(bot._RISH_CACHE["ok"])
         self.assertTrue(sent)
-        self.assertIn("Shizuku server 冇行緊", sent[0])  # fail-loud，唔再靜默
+        self.assertIn("彈窗通知出唔到，直接開咗", sent[0])
+        self.assertIn("可能彈唔出", sent[0])              # fail-loud，唔再靜默
 
     def test_no_warning_when_probe_ok(self):
         bot.shutil.which = lambda _: "/x/rish"
@@ -2077,9 +2088,96 @@ class TestNavFireRishWarning(unittest.TestCase):
         calls = []
         bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
         bot._RISH_CACHE.update({"t": 0.0, "ok": False})
+        bot._nav_confirm_notify = lambda job: (False, "冇")
         self._fire()
-        self.assertEqual(calls[0][0], "rish")           # probe ok → 行 rish 路線
-        self.assertNotIn("Shizuku server 冇行緊", sent[0])
+        self.assertEqual(calls[0][0], "rish")           # probe ok → WAKEUP 都行 rish
+        self.assertNotIn("可能彈唔出", sent[0])
+
+    def test_notify_ok_means_no_direct_open(self):
+        """彈窗通知成功 → 唔直接開 app，等用戶撳確定。"""
+        bot.shutil.which = lambda _: "/x/rish"
+        sent = []
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot._send_safe = fake_send
+        bot._jobs = lambda: []
+        bot._save_json = lambda *a, **k: None
+        calls = []
+        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
+        bot._shell_priv_exec = lambda s: calls.append(["wake", s]) or (True, "")
+        bot._nav_confirm_notify = lambda job: (True, "ok")
+        self._fire()
+        self.assertIn("撳【確定開地圖】先會開", sent[0])
+        # 淨係得 WAKEUP，冇直接 am start 開地圖
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "wake")
+
+
+class TestNavConfirmNotify(unittest.TestCase):
+    """頭條通知＋確定掣：寫開地圖腳本＋post 通知。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(self.tmp, "jobs.json")
+        self._which = bot.shutil.which
+        self._run = bot.subprocess.run
+
+    def tearDown(self):
+        bot.JOBS_PATH = self.old_j
+        bot.shutil.which = self._which
+        bot.subprocess.run = self._run
+
+    def _job(self):
+        return {"id": 7, "type": "nav", "url": "佐敦道31號", "mode": "r",
+                "label": "屋企", "chat_id": 123}
+
+    def test_nav_uri(self):
+        u = bot._nav_uri("沙田", "r")
+        self.assertTrue(u.startswith("google.navigation:q="))
+        self.assertIn("%E6%B2%99%E7%94%B0", u)
+        self.assertTrue(u.endswith("mode=r"))
+        self.assertEqual(bot._nav_uri("https://maps.app/x"), "https://maps.app/x")
+
+    def test_notify_posts_and_writes_script(self):
+        bot.shutil.which = lambda n: f"/x/{n}"
+        captured = {}
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        bot.subprocess.run = fake_run
+        ok, out = bot._nav_confirm_notify(self._job())
+        self.assertTrue(ok)
+        cmd = captured["cmd"]
+        self.assertEqual(cmd[0], "termux-notification")
+        self.assertIn("--button1", cmd)
+        self.assertIn("確定開地圖", cmd)
+        self.assertIn("--priority", cmd)
+        self.assertEqual(cmd[cmd.index("--priority") + 1], "high")
+        script = cmd[cmd.index("--button1-action") + 1]
+        self.assertTrue(script.startswith("sh "))
+        path = script[3:]
+        content = open(path).read()
+        self.assertIn(bot.ADB_TARGET, content)          # adb lane 優先
+        self.assertIn("google.navigation:q=", content)
+        self.assertIn("https://www.google.com/maps/dir/", content)  # 後備
+        self.assertTrue(os.stat(path).st_mode & 0o100)  # 可執行
+
+    def test_notify_missing_api(self):
+        bot.shutil.which = lambda n: None
+        ok, out = bot._nav_confirm_notify(self._job())
+        self.assertFalse(ok)
+        self.assertIn("termux-notification", out)
+
+    def test_notify_timeout(self):
+        bot.shutil.which = lambda n: f"/x/{n}"
+        def boom(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+        bot.subprocess.run = boom
+        ok, out = bot._nav_confirm_notify(self._job())
+        self.assertFalse(ok)
+        self.assertIn("超時", out)
 
 
 if __name__ == "__main__":
