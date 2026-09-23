@@ -213,6 +213,14 @@ def _read_hhmm_of(tok: str):
     return hh, mm
 
 
+def _read_start_tok(tok: str):
+    """分配開始時間：「現在／而家／now」＝即刻上車（用而家時間），否則當 hhmm 讀。"""
+    if re.fullmatch(r"現在|而家|now", tok, re.IGNORECASE):
+        n = dt.datetime.now()
+        return n.hour, n.minute
+    return _read_hhmm_of(tok)
+
+
 def _read_hhmm(rest: str):
     """由字頭讀 HH:MM / hhmm，回傳 (時, 分, 剩餘字串) 或 None。"""
     t = _TIME.match(rest)
@@ -463,7 +471,7 @@ def parse_player(text: str) -> PlayerCmd | None:
     # 時間分配：[每日] hhmm至hhmm 分配 [留空N%] 項目[x比例]…
     m = re.fullmatch(r"(?:每日|每天)\s*(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
     if m:
-        r1, r2 = _read_hhmm_of(m.group(1)), _read_hhmm_of(m.group(2))
+        r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
             return PlayerCmd("sched_alloc_daily", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
@@ -471,7 +479,7 @@ def parse_player(text: str) -> PlayerCmd | None:
         return None
     m = re.fullmatch(r"(\S+?)\s*[-–—~至到]\s*(\S+?)\s+分配\s*(?:留空\s*(\d+)\s*%\s*)?(.+)", s, re.IGNORECASE)
     if m:
-        r1, r2 = _read_hhmm_of(m.group(1)), _read_hhmm_of(m.group(2))
+        r1, r2 = _read_start_tok(m.group(1)), _read_hhmm_of(m.group(2))
         if r1 and r2:
             return PlayerCmd("sched_alloc", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
