@@ -791,7 +791,10 @@ def _nav_go_script_path(job: dict) -> str:
 
 
 def _nav_write_go_script(job: dict) -> str:
-    """寫「開地圖」腳本：adb lane 優先（WAKEUP＋--activity-clear-task），死咗普通 am，再死 web。
+    """寫「開地圖」腳本，三層後備：
+    ⓪ adb lane（WAKEUP＋--activity-clear-task，最齊全）
+    ① rish（Shizuku；無線調試死咗都仲行，重啟後先要再駁）
+    ③ termux-open-url（零權限兜底；冇 clear-task，舊 task 可能淨係帶上前）
     回傳腳本路徑。呢個腳本俾通知掣＋彈窗確認共用。"""
     dest = job.get("url") or job.get("label", "")
     mode = job.get("mode", "r")
@@ -802,17 +805,25 @@ def _nav_write_go_script(job: dict) -> str:
            f"{urllib.parse.quote(dest)}&travelmode={tmode}")
     script = _nav_go_script_path(job)
     adb = shutil.which("adb") or "/data/data/com.termux/files/usr/bin/adb"
+    rish = shutil.which("rish") or "/data/data/com.termux/files/usr/bin/rish"
     with open(script, "w") as f:
         f.write(f"""#!/system/bin/sh
-# bot 自動寫：撳「確定」開地圖（adb lane 優先；--activity-clear-task 必填——
+# bot 自動寫：開地圖三層後備（--activity-clear-task 必填——
 # 唔清舊 task 嘅話 Maps 淨係 brought to front，新導航指令送唔入去）
+# ⓪ adb lane
 {adb} connect {ADB_TARGET} >/dev/null 2>&1
 if {adb} -s {ADB_TARGET} shell "input keyevent KEYCODE_WAKEUP; \\
 am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}'" >/dev/null 2>&1; then
   exit 0
 fi
-am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/null 2>&1 \\
- || am start --activity-clear-task -a android.intent.action.VIEW -d '{web}'
+# ① rish（Shizuku）
+if [ -x {rish} ]; then
+  if {rish} -c "input keyevent KEYCODE_WAKEUP; am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}'" >/dev/null 2>&1; then
+    exit 0
+  fi
+fi
+# ② termux-open-url（零權限兜底）
+termux-open-url '{web}'
 """)
     os.chmod(script, 0o700)
     return script

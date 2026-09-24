@@ -2217,8 +2217,31 @@ class TestManualNavConfirm(unittest.TestCase):
         self.assertIn("直接開", r)
 
 
+class TestNavGoScript(unittest.TestCase):
+    """開地圖腳本：三層後備都要寫入。"""
+
+    def setUp(self):
+        self._jobs_path = bot.JOBS_PATH
+        self._tmp = tempfile.mkdtemp()
+        bot.JOBS_PATH = os.path.join(self._tmp, "jobs.json")
+
+    def tearDown(self):
+        bot.JOBS_PATH = self._jobs_path
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_three_tiers(self):
+        job = {"id": 9, "url": "尖沙咀", "mode": "r", "label": "尖沙咀"}
+        path = bot._nav_write_go_script(job)
+        body = open(path).read()
+        self.assertIn("adb", body)                 # ⓪ adb lane
+        self.assertIn("rish -c", body)             # ① Shizuku
+        self.assertIn("termux-open-url", body)     # ② 零權限兜底
+        self.assertIn("--activity-clear-task", body)
+        self.assertTrue(os.access(path, os.X_OK))
+
+
 class TestNavDialogTask(unittest.TestCase):
-    """真彈窗確認：termux-dialog confirm，撳【是】先開地圖。"""
+    """真彈窗確認：termux-dialog confirm，撳【是】先會開地圖。"""
 
     def setUp(self):
         self._run = bot.subprocess.run
