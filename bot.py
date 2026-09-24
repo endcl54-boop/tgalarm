@@ -800,14 +800,15 @@ def _nav_confirm_notify(job: dict) -> tuple:
     adb = shutil.which("adb") or "/data/data/com.termux/files/usr/bin/adb"
     with open(script, "w") as f:
         f.write(f"""#!/system/bin/sh
-# bot 自動寫：撳「確定」開地圖（adb lane 優先）
+# bot 自動寫：撳「確定」開地圖（adb lane 優先；--activity-clear-task 必填——
+# 唔清舊 task 嘅話 Maps 淨係 brought to front，新導航指令送唔入去）
 {adb} connect {ADB_TARGET} >/dev/null 2>&1
 if {adb} -s {ADB_TARGET} shell "input keyevent KEYCODE_WAKEUP; \\
-am start -a android.intent.action.VIEW -d '{uri}'" >/dev/null 2>&1; then
+am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}'" >/dev/null 2>&1; then
   exit 0
 fi
-am start -a android.intent.action.VIEW -d '{uri}' >/dev/null 2>&1 \\
- || am start -a android.intent.action.VIEW -d '{web}'
+am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/null 2>&1 \\
+ || am start --activity-clear-task -a android.intent.action.VIEW -d '{web}'
 """)
     os.chmod(script, 0o700)
     if not shutil.which("termux-notification"):
@@ -839,7 +840,8 @@ def _open_nav(dest: str, mode: str = "r") -> tuple:
     純文字→google.navigation:q=…；連結/geo URI→直接開。"""
     import urllib.parse
     uri = _nav_uri(dest, mode)
-    base = ["am", "start", "-a", "android.intent.action.VIEW", "-d", uri]
+    base = ["am", "start", "--activity-clear-task",
+            "-a", "android.intent.action.VIEW", "-d", uri]
     if _rish_available() or _adb_lane_available():
         ok, out = _shell_priv_exec(
             "input keyevent KEYCODE_WAKEUP; " + shlex.join(base))
@@ -853,12 +855,13 @@ def _open_nav(dest: str, mode: str = "r") -> tuple:
     tmode = {"r": "transit", "w": "walking", "d": "driving"}.get(mode, "transit")
     web = (f"https://www.google.com/maps/dir/?api=1&destination="
            f"{urllib.parse.quote(dest)}&travelmode={tmode}")
-    ok, out = run_intent(["am", "start", "-n",
+    ok, out = run_intent(["am", "start", "--activity-clear-task", "-n",
                           "com.google.android.apps.maps/com.google.android.maps.MapsActivity",
                           "-d", web])
     if ok:
         return ok, out
-    return run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", web])
+    return run_intent(["am", "start", "--activity-clear-task",
+                       "-a", "android.intent.action.VIEW", "-d", web])
 
 
 def _fmt_dests() -> str:

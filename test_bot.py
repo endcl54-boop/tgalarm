@@ -1899,7 +1899,8 @@ class TestNavFallback(unittest.TestCase):
             bot.run_intent = old
         self.assertTrue(ok)
         self.assertEqual(len(calls), 2)
-        self.assertIn("MapsActivity", calls[1][3])
+        self.assertIn("com.google.android.apps.maps/com.google.android.maps.MapsActivity", calls[1])
+        self.assertIn("--activity-clear-task", calls[1])
         self.assertIn("travelmode=walking", calls[1][-1])
 
     def test_https_last_resort(self):
@@ -1912,7 +1913,8 @@ class TestNavFallback(unittest.TestCase):
             bot.run_intent = old
         self.assertTrue(ok)
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2][2:4], ["-a", "android.intent.action.VIEW"])
+        self.assertIn("android.intent.action.VIEW", calls[2])
+        self.assertIn("--activity-clear-task", calls[2])
         self.assertIn("travelmode=transit", calls[2][-1])
 
     def test_all_fail_reports_last_error(self):
@@ -1950,7 +1952,7 @@ class TestOpenNavRish(unittest.TestCase):
         self.assertEqual(calls[0][:2], ["rish", "-c"])
         payload = calls[0][2]
         self.assertTrue(payload.startswith("input keyevent KEYCODE_WAKEUP;"))
-        self.assertIn("am start -a android.intent.action.VIEW", payload)
+        self.assertIn("am start --activity-clear-task -a android.intent.action.VIEW", payload)
         self.assertIn("google.navigation:q=", payload)
 
     def test_rish_fail_falls_back_to_am(self):
