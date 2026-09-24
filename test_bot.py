@@ -2217,5 +2217,96 @@ class TestManualNavConfirm(unittest.TestCase):
         self.assertIn("直接開", r)
 
 
+class TestNavUnlockWatch(unittest.TestCase):
+    """鎖屏到點：解鎖後自動重發通知令頭條重新彈出。"""
+
+    def setUp(self):
+        self._shell = bot._adb_shell
+        self._notify = bot._nav_confirm_notify
+        self._unlocked = bot._screen_unlocked
+        self._watch = bot._nav_unlock_watch
+        self._run = bot.subprocess.run
+        self._sleep = asyncio.sleep
+
+        async def fast_sleep(_):
+            pass
+        asyncio.sleep = fast_sleep
+
+    def tearDown(self):
+        bot._adb_shell = self._shell
+        bot._nav_confirm_notify = self._notify
+        bot._screen_unlocked = self._unlocked
+        bot._nav_unlock_watch = self._watch
+        bot.subprocess.run = self._run
+        asyncio.sleep = self._sleep
+
+    def _job(self):
+        return {"id": 3, "type": "nav", "url": "X", "mode": "r",
+                "label": "屋企", "chat_id": 1}
+
+    def test_screen_unlocked_true(self):
+        bot._adb_shell = lambda c: (True, "isKeyguardShowing=false\n  mWakefulness=Awake")
+        self.assertTrue(bot._screen_unlocked())
+
+    def test_screen_locked(self):
+        bot._adb_shell = lambda c: (True, "isKeyguardShowing=true\n  mWakefulness=Awake")
+        self.assertFalse(bot._screen_unlocked())
+
+    def test_screen_off(self):
+        bot._adb_shell = lambda c: (True, "isKeyguardShowing=false\n  mWakefulness=Asleep")
+        self.assertFalse(bot._screen_unlocked())
+
+    def test_adb_dead_means_locked(self):
+        bot._adb_shell = lambda c: (False, "")
+        self.assertFalse(bot._screen_unlocked())
+
+    def test_watch_reposts_after_unlock(self):
+        states = iter([False, False, True])
+        bot._screen_unlocked = lambda: next(states, True)
+        removed, posted = [], []
+        bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
+        bot._nav_confirm_notify = lambda job: posted.append(job["id"]) or (True, "ok")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
+        finally:
+            loop.close()
+        self.assertEqual(removed, ["termux-notification-remove"])
+        self.assertEqual(posted, [3])                 # 解鎖後重發一次
+
+    def test_fire_starts_watch_when_locked(self):
+        watched = []
+        bot._nav_confirm_notify = lambda job: (True, "ok")
+        bot._screen_unlocked = lambda: False
+        async def fake_watch(job):
+            watched.append(job["id"])
+        bot._nav_unlock_watch = fake_watch
+        bot._shell_priv_exec = lambda s: (True, "")
+        bot.run_intent = lambda cmd: (True, "")
+        sent = []
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        old_send, old_jobs, old_save, old_dry = (bot._send_safe, bot._jobs,
+                                                 bot._save_json, bot.DRY_RUN)
+        bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = fake_send, lambda: [], (lambda *a, **k: None), False
+        try:
+            nxt = (dt.datetime.now() + dt.timedelta(seconds=1)).isoformat()
+            job = {"id": 42, "type": "nav", "hh": 7, "mm": 0, "daily": False,
+                   "url": "X", "seconds": 0, "mode": "r", "label": "屋企",
+                   "chat_id": 1, "next": nxt, "shuffle": False, "paused": False}
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(bot._fire_later(job, 0.01))
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending))
+            finally:
+                loop.close()
+        finally:
+            bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = old_send, old_jobs, old_save, old_dry
+        self.assertEqual(watched, [42])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

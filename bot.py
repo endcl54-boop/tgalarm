@@ -821,6 +821,7 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
            "--title", "⏰ 到點！開導航？",
            "--content", f"去「{label}」——撳【確定】開地圖",
            "--priority", "high",
+           "--sound", "--vibrate", "500,300,500",
            "--button1", "確定開地圖", "--button1-action", f"sh {script}",
            "--button2", "唔使", "--button2-action", f"termux-notification-remove {nid}"]
     try:
@@ -831,6 +832,32 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
         return False, "termux-notification 超時"
     except Exception as e:  # noqa: BLE001
         return False, str(e)
+
+
+def _screen_unlocked() -> bool:
+    """解鎖偵測：螢幕著埋＋鎖屏冇咗先算。經 adb lane 讀 dumpsys。"""
+    ok, out = _adb_shell("dumpsys window 2>/dev/null | grep -m1 isKeyguardShowing; "
+                         "dumpsys power 2>/dev/null | grep -m1 mWakefulness")
+    if not ok:
+        return False
+    return "isKeyguardShowing=false" in out and "mWakefulness=Awake" in out
+
+
+async def _nav_unlock_watch(job: dict) -> None:
+    """鎖屏時彈唔到頭條 → 每 5 秒偵測解鎖，一解鎖就重發通知令橫幅重新彈出。
+    最多睇 3 分鐘；其間用戶撳咗確定/唔使都唔理（重發只係再彈一次，無害）。"""
+    nid = f"nav{job.get('id', 0)}"
+    for _ in range(36):                       # 36 × 5s = 3 分鐘
+        await asyncio.sleep(5)
+        try:
+            if _screen_unlocked():
+                subprocess.run(["termux-notification-remove", nid],
+                               capture_output=True, timeout=6)
+                await asyncio.sleep(0.5)
+                _nav_confirm_notify(job)      # 重發 → 頭條喺解鎖後彈出
+                return
+        except Exception:  # noqa: BLE001
+            return
 
 
 def _open_nav(dest: str, mode: str = "r") -> tuple:
@@ -1287,6 +1314,11 @@ async def _fire_later(job: dict, delay: float) -> None:
             _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 先著螢幕，頭條先彈到
         ok, info = _nav_confirm_notify(job)
         if ok:
+            if not DRY_RUN and not _screen_unlocked():
+                try:
+                    asyncio.create_task(_nav_unlock_watch(job))  # 鎖緊屏 → 解鎖後自動重彈
+                except RuntimeError:
+                    pass                  # 冇 event loop（理論上唔會）就唔睇解鎖
             how = f"開導航去「{label}」——頭條通知彈咗，撳【確定開地圖】先會開"
         else:
             # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
@@ -2079,6 +2111,11 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                     "url": dest, "mode": mode, "label": shown, "chat_id": chat_id}
             wok, _winfo = _nav_confirm_notify(fake)
             if wok:
+                if not _screen_unlocked():
+                    try:
+                        asyncio.create_task(_nav_unlock_watch(fake))
+                    except RuntimeError:
+                        pass
                 return (f"🧭 導航去「{shown}」（{_mode_label(mode)}）——"
                         "頭條通知彈咗，撳【確定開地圖】先會開")
         ok, out = _open_nav(dest, mode)
