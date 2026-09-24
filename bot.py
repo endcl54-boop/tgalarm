@@ -763,15 +763,16 @@ def _adb_lane_available() -> bool:
 
 
 def _shell_priv_exec(cmd_str: str) -> tuple:
-    """統一嘅 uid 2000 執行：rish（Shizuku）優先，死咗用 adb lane。
+    """統一嘅 uid 2000 執行：adb lane（自攜 127.0.0.1:5555）優先，死咗用 rish。
+    adb lane 唔使 Shizuku 行緊，少一個單點故障；用戶實測通知掣路穩。
     回傳 (ok, 輸出)；兩條都冇 → (False, 原因)。"""
-    if _rish_available():
-        ok, out = run_intent(["rish", "-c", cmd_str])
+    if _adb_lane_available():
+        ok, out = _adb_shell(cmd_str)
         if ok:
             return ok, out
-    if _adb_lane_available():
-        return _adb_shell(cmd_str)
-    return False, "rish 同 adb lane 都唔喺度"
+    if _rish_available():
+        return run_intent(["rish", "-c", cmd_str])
+    return False, "adb lane 同 rish 都唔喺度"
 
 
 def _nav_uri(dest: str, mode: str = "r") -> str:

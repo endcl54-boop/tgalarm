@@ -1221,25 +1221,26 @@ class TestAdbLane(unittest.TestCase):
             self.assertIsNotNone(c, s)
             self.assertEqual(c.action, "shizuku_revive", s)
 
-    def test_priv_exec_prefers_rish(self):
-        calls = []
+    def test_priv_exec_prefers_adb_lane(self):
+        adb_calls = []
         with mock.patch.object(bot, "_rish_available", return_value=True), \
              mock.patch.object(bot, "_adb_lane_available", return_value=True), \
-             mock.patch.object(bot, "run_intent",
-                               side_effect=lambda c: (calls.append(c), (True, "rish-ok"))[1]), \
-             mock.patch.object(bot, "_adb_shell", return_value=(True, "adb-ok")):
+             mock.patch.object(bot, "_adb_shell",
+                               side_effect=lambda c: (adb_calls.append(c), (True, "adb-ok"))[1]), \
+             mock.patch.object(bot, "run_intent", return_value=(True, "rish-ok")) as ri:
             ok, out = bot._shell_priv_exec("echo hi")
         self.assertTrue(ok)
-        self.assertEqual(out, "rish-ok")
-        self.assertEqual(calls[0][:2], ["rish", "-c"])
+        self.assertEqual(out, "adb-ok")          # adb lane 先行
+        self.assertEqual(adb_calls, ["echo hi"])
+        ri.assert_not_called()                    # rish 唔使開
 
-    def test_priv_exec_falls_back_to_adb(self):
-        with mock.patch.object(bot, "_rish_available", return_value=False), \
-             mock.patch.object(bot, "_adb_lane_available", return_value=True), \
-             mock.patch.object(bot, "_adb_shell", return_value=(True, "adb-ok")) as m:
+    def test_priv_exec_falls_back_to_rish(self):
+        with mock.patch.object(bot, "_adb_lane_available", return_value=False), \
+             mock.patch.object(bot, "_rish_available", return_value=True), \
+             mock.patch.object(bot, "run_intent", return_value=(True, "rish-ok")) as m:
             ok, out = bot._shell_priv_exec("echo hi")
-        self.assertEqual((ok, out), (True, "adb-ok"))
-        m.assert_called_once_with("echo hi")
+        self.assertEqual((ok, out), (True, "rish-ok"))
+        self.assertEqual(m.call_args[0][0][:2], ["rish", "-c"])
 
     def test_priv_exec_both_down(self):
         with mock.patch.object(bot, "_rish_available", return_value=False), \
