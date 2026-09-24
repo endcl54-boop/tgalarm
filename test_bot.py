@@ -2260,24 +2260,49 @@ class TestNavUnlockWatch(unittest.TestCase):
         bot._adb_shell = lambda c: (False, "")
         self.assertFalse(bot._screen_unlocked())
 
-    def test_watch_reposts_after_unlock(self):
-        states = iter([False, False, True])
-        bot._screen_unlocked = lambda: next(states, True)
-        removed, posted = [], []
+    def test_watch_reposts_while_notification_present(self):
+        # 頭兩輪通知仲喺度（重彈），第三輪冇咗（用戶撳咗）→ 收工
+        counts = iter(["2\n", "1\n", "0\n"])
+        bot._adb_shell = lambda c: (True, next(counts, "0\n"))
+        removed, reposted = [], []
         bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
-        bot._nav_confirm_notify = lambda job: posted.append(job["id"]) or (True, "ok")
+        bot._nav_confirm_notify = lambda job, alert=True: (
+            reposted.append((job["id"], alert)) or (True, "ok"))
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(bot._nav_unlock_watch(self._job()))
         finally:
             loop.close()
-        self.assertEqual(removed, ["termux-notification-remove"])
-        self.assertEqual(posted, [3])                 # 解鎖後重發一次
+        self.assertEqual(removed, ["termux-notification-remove"] * 2)
+        self.assertEqual(reposted, [(3, False), (3, False)])  # 重彈唔再響
 
-    def test_fire_starts_watch_when_locked(self):
+    def test_watch_stops_when_notification_gone(self):
+        bot._adb_shell = lambda c: (True, "0\n")      # 第一輪就冇咗
+        removed = []
+        bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
+        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
+        finally:
+            loop.close()
+        self.assertEqual(removed, [])                  # 冇重彈過
+
+    def test_watch_stops_when_adb_dead(self):
+        bot._adb_shell = lambda c: (False, "")
+        removed = []
+        bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
+        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
+        finally:
+            loop.close()
+        self.assertEqual(removed, [])
+
+    def test_fire_starts_watch(self):
         watched = []
-        bot._nav_confirm_notify = lambda job: (True, "ok")
-        bot._screen_unlocked = lambda: False
+        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
         async def fake_watch(job):
             watched.append(job["id"])
         bot._nav_unlock_watch = fake_watch

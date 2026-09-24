@@ -786,8 +786,9 @@ def _nav_uri(dest: str, mode: str = "r") -> str:
 # ---- 導航確認彈窗：到點先彈通知，撳「確定」先開地圖 ----
 # vivo 背景閘 + 鎖屏令「靜雞雞開 app」睇唔到；改做頭條通知＋確定掣，
 # 撳掣嗰下 Termux:API 有前台交互 → 地圖一定彈到。
-def _nav_confirm_notify(job: dict) -> tuple:
+def _nav_confirm_notify(job: dict, alert: bool = True) -> tuple:
     """發頭條通知「開導航去X？〔確定〕」；回傳 (ok, 輸出)。
+    alert=True 先有聲＋震動（重彈嗰啲淨彈橫幅，唔好嘈）。
     確定掣行 ~/.tgalarm/nav_go_<id>.sh：adb lane 優先，死咗普通 am。"""
     dest = job.get("url") or job.get("label", "")
     mode = job.get("mode", "r")
@@ -821,9 +822,10 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
            "--title", "⏰ 到點！開導航？",
            "--content", f"去「{label}」——撳【確定】開地圖",
            "--priority", "high",
-           "--sound", "--vibrate", "500,300,500",
            "--button1", "確定開地圖", "--button1-action", f"sh {script}",
            "--button2", "唔使", "--button2-action", f"termux-notification-remove {nid}"]
+    if alert:
+        cmd += ["--sound", "--vibrate", "500,300,500"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
         out = (r.stdout + r.stderr).strip()
@@ -844,18 +846,22 @@ def _screen_unlocked() -> bool:
 
 
 async def _nav_unlock_watch(job: dict) -> None:
-    """鎖屏時彈唔到頭條 → 每 5 秒偵測解鎖，一解鎖就重發通知令橫幅重新彈出。
-    最多睇 3 分鐘；其間用戶撳咗確定/唔使都唔理（重發只係再彈一次，無害）。"""
+    """重彈 loop：vivo 頭條橫幅淨係維持約 5 秒，錯過就冇。
+    所以每 25 秒檢查一次：通知仲喺度（用戶未撳掣）→ 重發一次令橫幅再彈。
+    用戶撳咗【確定】或【唔使】→ 通知自動消失 → loop 即刻收工。
+    鎖屏期間重發唔會彈橫幅，但一解鎖下一輪就會彈——唔使額外偵測。
+    上限 12 輪（約 5 分鐘），之後淨留通知喺欄。"""
     nid = f"nav{job.get('id', 0)}"
-    for _ in range(36):                       # 36 × 5s = 3 分鐘
-        await asyncio.sleep(5)
+    for _ in range(12):
+        await asyncio.sleep(25)
         try:
-            if _screen_unlocked():
-                subprocess.run(["termux-notification-remove", nid],
-                               capture_output=True, timeout=6)
-                await asyncio.sleep(0.5)
-                _nav_confirm_notify(job)      # 重發 → 頭條喺解鎖後彈出
-                return
+            ok, out = _adb_shell(f'dumpsys notification --noredact | grep -c "tag={nid}"')
+            if not ok or not out.strip().isdigit() or int(out.strip()) == 0:
+                return                        # 通知冇咗 = 用戶已經撳咗掣／清咗
+            subprocess.run(["termux-notification-remove", nid],
+                           capture_output=True, timeout=6)
+            await asyncio.sleep(0.4)
+            _nav_confirm_notify(job, alert=False)   # 重彈（唔再響）
         except Exception:  # noqa: BLE001
             return
 
@@ -1314,11 +1320,11 @@ async def _fire_later(job: dict, delay: float) -> None:
             _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 先著螢幕，頭條先彈到
         ok, info = _nav_confirm_notify(job)
         if ok:
-            if not DRY_RUN and not _screen_unlocked():
+            if not DRY_RUN:
                 try:
-                    asyncio.create_task(_nav_unlock_watch(job))  # 鎖緊屏 → 解鎖後自動重彈
+                    asyncio.create_task(_nav_unlock_watch(job))  # 重彈 loop：每 25 秒彈到你理
                 except RuntimeError:
-                    pass                  # 冇 event loop（理論上唔會）就唔睇解鎖
+                    pass                  # 冇 event loop（理論上唔會）就唔跟
             how = f"開導航去「{label}」——頭條通知彈咗，撳【確定開地圖】先會開"
         else:
             # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
@@ -2111,11 +2117,10 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                     "url": dest, "mode": mode, "label": shown, "chat_id": chat_id}
             wok, _winfo = _nav_confirm_notify(fake)
             if wok:
-                if not _screen_unlocked():
-                    try:
-                        asyncio.create_task(_nav_unlock_watch(fake))
-                    except RuntimeError:
-                        pass
+                try:
+                    asyncio.create_task(_nav_unlock_watch(fake))
+                except RuntimeError:
+                    pass
                 return (f"🧭 導航去「{shown}」（{_mode_label(mode)}）——"
                         "頭條通知彈咗，撳【確定開地圖】先會開")
         ok, out = _open_nav(dest, mode)
