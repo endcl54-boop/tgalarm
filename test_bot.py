@@ -2182,5 +2182,39 @@ class TestNavConfirmNotify(unittest.TestCase):
         self.assertIn("超時", out)
 
 
+class TestManualNavConfirm(unittest.TestCase):
+    """手動「導航 X」都要先彈確認通知，撳掣先開地圖。"""
+
+    def setUp(self):
+        self._notify = bot._nav_confirm_notify
+        self._open = bot._open_nav
+        self._dry = bot.DRY_RUN
+        bot.DRY_RUN = False
+
+    def tearDown(self):
+        bot._nav_confirm_notify = self._notify
+        bot._open_nav = self._open
+        bot.DRY_RUN = self._dry
+
+    def _ex(self, line):
+        return bot._execute_player(bot.parse_player(line), 12345,
+                                   dt.datetime(2026, 9, 24, 10, 0))
+
+    def test_notify_first(self):
+        opened = []
+        bot._nav_confirm_notify = lambda job: (True, "ok")
+        bot._open_nav = lambda d, m: opened.append(1) or (True, "")
+        r = self._ex("導航 屋企")
+        self.assertIn("撳【確定開地圖】先會開", r)
+        self.assertEqual(opened, [])          # 未撳掣 → 唔直接開
+
+    def test_notify_fail_direct_open(self):
+        bot._nav_confirm_notify = lambda job: (False, "冇 termux-notification")
+        bot._open_nav = lambda d, m: (True, "")
+        r = self._ex("導航 屋企")
+        self.assertIn("開緊導航去", r)
+        self.assertIn("直接開", r)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

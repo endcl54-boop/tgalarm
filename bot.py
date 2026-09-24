@@ -2072,10 +2072,19 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         return f"搵唔到地點「{cmd.ref}」"
     if a == "nav":
         dest, mode, shown = _nav_target(cmd.ref)
+        if not DRY_RUN:
+            # 同到點排程一樣：先彈確認通知，撳【確定開地圖】先開
+            fake = {"id": f"m{int(now.timestamp()) % 100000}", "type": "nav",
+                    "url": dest, "mode": mode, "label": shown, "chat_id": chat_id}
+            wok, _winfo = _nav_confirm_notify(fake)
+            if wok:
+                return (f"🧭 導航去「{shown}」（{_mode_label(mode)}）——"
+                        "頭條通知彈咗，撳【確定開地圖】先會開")
         ok, out = _open_nav(dest, mode)
         if ok:
+            extra = "（彈窗出唔到，直接開）" if not DRY_RUN else ""
             tag = f"開緊導航去「{shown}」（{_mode_label(mode)}）"
-            return f"🧭 {tag}" + ("（DRY_RUN）" if DRY_RUN else "")
+            return f"🧭 {tag}" + extra + ("（DRY_RUN）" if DRY_RUN else "")
         return "❌ 開唔到 Google Maps（有冇裝 Maps app？）：" + out[:150]
     if a == "todo":
         _schedule_todo_refresh(chat_id)
