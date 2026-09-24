@@ -2222,6 +2222,125 @@ class TestManualNavConfirm(unittest.TestCase):
         self.assertIn("直接開", r)
 
 
+class TestWeather(unittest.TestCase):
+    """天氣：Open-Meteo 查詢＋隨問隨答＋每日簡報排程。"""
+
+    PAYLOAD = {
+        "current": {"time": "2026-09-24T11:00", "temperature_2m": 30.1,
+                    "apparent_temperature": 34.0, "relative_humidity_2m": 80,
+                    "weather_code": 2, "wind_speed_10m": 12.0, "precipitation": 0},
+        "hourly": {"time": ["2026-09-24T11:00", "2026-09-24T12:00",
+                            "2026-09-24T13:00"],
+                   "precipitation_probability": [10, 60, 40]},
+        "daily": {"weather_code": [2, 95], "temperature_2m_max": [32, 31],
+                  "temperature_2m_min": [27, 26],
+                  "precipitation_probability_max": [60, 80],
+                  "uv_index_max": [9, 8], "precipitation_sum": [1, 5]}}
+
+    def setUp(self):
+        import urllib.request
+        self._urlopen = urllib.request.urlopen
+        self._report = bot._weather_report
+        self._owner = bot._ensure_owner
+        self._send = bot._send_safe
+        self._jobs = bot._jobs
+        self._save = bot._save_json
+        self._arm = bot._arm
+
+    def tearDown(self):
+        import urllib.request
+        urllib.request.urlopen = self._urlopen
+        bot._weather_report = self._report
+        bot._ensure_owner = self._owner
+        bot._send_safe = self._send
+        bot._jobs = self._jobs
+        bot._save_json = self._save
+        bot._arm = self._arm
+
+    def test_report_formats_and_umbrella(self):
+        import urllib.request
+
+        class R:
+            def read(self_):
+                return json.dumps(self.PAYLOAD).encode()
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+        urllib.request.urlopen = lambda url, timeout=30: R()
+        ok, txt = bot._weather_report()
+        self.assertTrue(ok)
+        self.assertIn("30.1°C", txt)
+        self.assertIn("間中多雲", txt)
+        self.assertIn("聽日", txt)
+        self.assertIn("雷雨", txt)
+        self.assertIn("帶遮", txt)          # 未來幾鐘 60% → 提醒
+
+    def test_report_network_error(self):
+        import urllib.request
+
+        def boom(url, timeout=30):
+            raise OSError("dead")
+        urllib.request.urlopen = boom
+        ok, msg = bot._weather_report()
+        self.assertFalse(ok)
+        self.assertIn("dead", msg)
+
+    def test_ondemand_dispatch(self):
+        replies = []
+
+        class Msg:
+            text = "天氣"
+
+            async def reply_text(self, t):
+                replies.append(t)
+
+        class Upd:
+            message = Msg()
+
+        bot._ensure_owner = _ensure_owner_true
+        bot._weather_report = lambda: (True, "今日好熱")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_message(Upd(), None))
+        finally:
+            loop.close()
+        self.assertEqual(len(replies), 2)
+        self.assertIn("今日好熱", replies[1])
+
+    def test_fire_weather_daily_reschedules(self):
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append((cid, text))
+            return True
+        bot._weather_report = lambda: (True, "好天")
+        bot._send_safe = fake_send
+        orig_next = dt.datetime.now().isoformat()
+        job = {"id": 77, "type": "weather", "hh": 11, "mm": 0, "daily": True,
+               "chat_id": 1, "next": orig_next}
+        bot._jobs = lambda: [dict(job)]
+        saved = []
+        bot._save_json = lambda path, data: saved.append(data)
+        bot._arm = lambda j: None
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+        finally:
+            loop.close()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("🌤", sent[0][1])
+        self.assertIn("好天", sent[0][1])
+        self.assertTrue(saved)             # next 已重排＋存檔
+        self.assertNotEqual(saved[0][0]["next"], orig_next)
+
+    def test_fmt_job_weather(self):
+        self.assertEqual(bot._fmt_job_content(
+            {"type": "weather", "hh": 11, "mm": 0}), "天氣簡報")
+
+
 class TestNavGoScript(unittest.TestCase):
     """開地圖腳本：三層後備都要寫入。"""
 

@@ -143,6 +143,7 @@ HELP = (
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
+    "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
 )
 
 # ---------------- 指令解析 ----------------
@@ -959,6 +960,60 @@ def _ai_mode_answer(question: str, timeout: int = 90) -> tuple:
     return True, body
 
 
+_WEATHER_URL = (
+    "https://api.open-meteo.com/v1/forecast?latitude=22.3193&longitude=114.1694"
+    "&current=temperature_2m,apparent_temperature,relative_humidity_2m,"
+    "precipitation,weather_code,wind_speed_10m"
+    "&hourly=precipitation_probability,temperature_2m"
+    "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,"
+    "precipitation_sum,uv_index_max,weather_code"
+    "&timezone=Asia%2FHong_Kong&forecast_days=2")
+
+_WMO = {0: "天晴", 1: "大致天晴", 2: "間中多雲", 3: "密雲", 45: "霧", 48: "霧",
+        51: "毛毛雨", 53: "毛毛雨", 55: "毛毛雨", 56: "凍毛毛雨", 57: "凍毛毛雨",
+        61: "微雨", 63: "雨", 65: "大雨", 66: "凍雨", 67: "凍雨",
+        71: "微雪", 73: "雪", 75: "大雪", 77: "雪粒",
+        80: "驟雨", 81: "驟雨", 82: "強驟雨", 85: "陣雪", 86: "陣雪",
+        95: "雷雨", 96: "雷雨＋冰雹", 99: "雷雨＋冰雹"}
+
+
+def _weather_report() -> tuple:
+    """Open-Meteo（免費、冇 key）攞 HK 天氣：而家＋今日＋聽日＋帶遮建議。
+    回傳 (ok, 文字)。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(_WEATHER_URL, timeout=30) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        cur, daily, hourly = d["current"], d["daily"], d["hourly"]
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+    try:
+        lines = [
+            f"而家：{_WMO.get(cur['weather_code'], '—')}，{cur['temperature_2m']}°C"
+            f"（體感 {cur['apparent_temperature']}°C），濕度 {cur['relative_humidity_2m']}%，"
+            f"風 {cur['wind_speed_10m']} km/h",
+            f"今日：{_WMO.get(daily['weather_code'][0], '—')}，"
+            f"{daily['temperature_2m_min'][0]}–{daily['temperature_2m_max'][0]}°C，"
+            f"最高落雨機率 {daily['precipitation_probability_max'][0]}%，"
+            f"UV {daily['uv_index_max'][0]}",
+            f"聽日：{_WMO.get(daily['weather_code'][1], '—')}，"
+            f"{daily['temperature_2m_min'][1]}–{daily['temperature_2m_max'][1]}°C，"
+            f"落雨機率 {daily['precipitation_probability_max'][1]}%",
+        ]
+        # 未來 6 小時落雨機率 → 帶遮建議
+        t_now = cur.get("time", "")
+        probs = [p for t, p in zip(hourly.get("time", []),
+                                   hourly.get("precipitation_probability", []))
+                 if t >= t_now][:6]
+        if probs and max(probs) >= 50:
+            lines.append(f"⛱ 未來幾個鐘最高 {max(probs)}% 機會落雨——記得帶遮！")
+        elif probs and max(probs) >= 30:
+            lines.append(f"🌂 未來幾個鐘有 {max(probs)}% 機會落雨，帶遮穩陣啲")
+        return True, "\n".join(lines)
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        return False, f"天氣資料格式唔啱：{e}"
+
+
 def _open_nav(dest: str, mode: str = "r") -> tuple:
     """開 Google Maps 導航，rish（Shizuku/adb shell）優先，三重後備：
     ⓪ rish＋喚醒螢幕（vivo/小米 背景閘剋星；有 Shizuku 一定行呢步）
@@ -1338,6 +1393,8 @@ def _fmt_job_content(j: dict) -> str:
         return f"計時 {fmt_duration(j.get('seconds', 0))}{tag}"
     if j.get("type") == "nav":
         return f"導航去「{j['label']}」"
+    if j.get("type") == "weather":
+        return "天氣簡報"
     if j.get("type") == "alloc":
         segs = j.get("segments", [])
         names = "、".join(s["text"] for s in segs)
@@ -1354,7 +1411,8 @@ def _fmt_jobs(now: dt.datetime) -> str:
     lines = ["🗓 排程："]
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
-        icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩"}.get(j.get("type"), "🎵")
+        icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩",
+                "weather": "🌤"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
         else:
@@ -1403,6 +1461,23 @@ async def _fire_later(job: dict, delay: float) -> None:
     jtype = job.get("type", "play")
     if jtype == "alloc":
         await _fire_alloc(job)
+        return
+    if jtype == "weather":
+        wok, report = await asyncio.to_thread(_weather_report)
+        msg = ("🌤 " + report) if wok else f"❌ 天氣攞唔到：{report[:120]}"
+        await _send_safe(job["chat_id"], msg, "天氣簡報")
+        if job.get("daily"):
+            job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
+            jobs = _jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["next"] = job["next"]
+            _save_json(JOBS_PATH, jobs)
+            _TASKS.pop(job["id"], None)
+            _arm(job)
+        else:
+            _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+            _TASKS.pop(job["id"], None)
         return
     if jtype == "timer":
         ok, info = run_intent(timer_intent_cmd(job["seconds"], job.get("label", "")))
@@ -2305,6 +2380,12 @@ async def _on_message(update, context):
         return
 
     t = update.message.text.strip()
+    if t in ("天氣", "天气", "weather") or t.startswith("天氣 "):
+        await update.message.reply_text("🌤 查緊天氣…")
+        wok, rep = await asyncio.to_thread(_weather_report)
+        await update.message.reply_text(("🌤 " + rep) if wok
+                                        else f"❌ 天氣攞唔到：{rep[:150]}")
+        return
     if t.lower().startswith("ai ") or t.startswith("問 "):
         parts = t.split(None, 1)
         q = parts[1].strip() if len(parts) > 1 else ""
