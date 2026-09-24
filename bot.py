@@ -786,10 +786,13 @@ def _nav_uri(dest: str, mode: str = "r") -> str:
 # ---- 導航確認彈窗：到點先彈通知，撳「確定」先開地圖 ----
 # vivo 背景閘 + 鎖屏令「靜雞雞開 app」睇唔到；改做頭條通知＋確定掣，
 # 撳掣嗰下 Termux:API 有前台交互 → 地圖一定彈到。
-def _nav_confirm_notify(job: dict, alert: bool = True) -> tuple:
-    """發頭條通知「開導航去X？〔確定〕」；回傳 (ok, 輸出)。
-    alert=True 先有聲＋震動（重彈嗰啲淨彈橫幅，唔好嘈）。
-    確定掣行 ~/.tgalarm/nav_go_<id>.sh：adb lane 優先，死咗普通 am。"""
+def _nav_go_script_path(job: dict) -> str:
+    return os.path.join(os.path.dirname(JOBS_PATH), f"nav_go_{job.get('id', 0)}.sh")
+
+
+def _nav_write_go_script(job: dict) -> str:
+    """寫「開地圖」腳本：adb lane 優先（WAKEUP＋--activity-clear-task），死咗普通 am，再死 web。
+    回傳腳本路徑。呢個腳本俾通知掣＋彈窗確認共用。"""
     dest = job.get("url") or job.get("label", "")
     mode = job.get("mode", "r")
     uri = _nav_uri(dest, mode)
@@ -797,8 +800,7 @@ def _nav_confirm_notify(job: dict, alert: bool = True) -> tuple:
     tmode = {"r": "transit", "w": "walking", "d": "driving"}.get(mode, "transit")
     web = (f"https://www.google.com/maps/dir/?api=1&destination="
            f"{urllib.parse.quote(dest)}&travelmode={tmode}")
-    home = os.path.expanduser("~")
-    script = os.path.join(os.path.dirname(JOBS_PATH), f"nav_go_{job.get('id', 0)}.sh")
+    script = _nav_go_script_path(job)
     adb = shutil.which("adb") or "/data/data/com.termux/files/usr/bin/adb"
     with open(script, "w") as f:
         f.write(f"""#!/system/bin/sh
@@ -813,6 +815,14 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
  || am start --activity-clear-task -a android.intent.action.VIEW -d '{web}'
 """)
     os.chmod(script, 0o700)
+    return script
+
+
+def _nav_confirm_notify(job: dict) -> tuple:
+    """發通知做提醒（聲＋震動）；回傳 (ok, 輸出)。
+    真正確認靠 _nav_dialog_task 嘅彈窗；通知掣留返做後備。"""
+    dest = job.get("url") or job.get("label", "")
+    script = _nav_write_go_script(job)
     if not shutil.which("termux-notification"):
         return False, "冇 termux-notification"
     nid = f"nav{job.get('id', 0)}"
@@ -820,12 +830,11 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
     cmd = ["termux-notification",
            "--id", nid,
            "--title", "⏰ 到點！開導航？",
-           "--content", f"去「{label}」——撳【確定】開地圖",
+           "--content", f"去「{label}」——彈窗問緊你，撳【是】開地圖",
            "--priority", "high",
            "--button1", "確定開地圖", "--button1-action", f"sh {script}",
-           "--button2", "唔使", "--button2-action", f"termux-notification-remove {nid}"]
-    if alert:
-        cmd += ["--sound", "--vibrate", "500,300,500"]
+           "--button2", "唔使", "--button2-action", f"termux-notification-remove {nid}",
+           "--sound", "--vibrate", "500,300,500"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
         out = (r.stdout + r.stderr).strip()
@@ -836,34 +845,59 @@ am start --activity-clear-task -a android.intent.action.VIEW -d '{uri}' >/dev/nu
         return False, str(e)
 
 
-def _screen_unlocked() -> bool:
-    """解鎖偵測：螢幕著埋＋鎖屏冇咗先算。經 adb lane 讀 dumpsys。"""
-    ok, out = _adb_shell("dumpsys window 2>/dev/null | grep -m1 isKeyguardShowing; "
-                         "dumpsys power 2>/dev/null | grep -m1 mWakefulness")
-    if not ok:
-        return False
-    return "isKeyguardShowing=false" in out and "mWakefulness=Awake" in out
+def _nav_dialog_block(job: dict, timeout: int = 600) -> str:
+    """阻塞式真彈窗：termux-dialog confirm，等用戶撳【是】／【否】。
+    回傳 'yes'／'no'／'timeout'／'err'。要喺 thread 度行（會等最多 10 分鐘）。
+    實測（2026-09-24）：Termux 自己開嘅彈窗係出到嘅——之前死係死喺經 rish。"""
+    label = job.get("label") or job.get("url", "")
+    try:
+        r = subprocess.run(["termux-dialog", "confirm",
+                            "-t", "⏰ 開導航？",
+                            "-i", f"而家開地圖去「{label}」？"],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    except Exception:  # noqa: BLE001
+        return "err"
+    out = (r.stdout or "")
+    if '"yes"' in out:
+        return "yes"
+    if '"no"' in out:
+        return "no"
+    return "err"
 
 
-async def _nav_unlock_watch(job: dict) -> None:
-    """重彈 loop：vivo 頭條橫幅淨係維持約 5 秒，錯過就冇。
-    所以每 25 秒檢查一次：通知仲喺度（用戶未撳掣）→ 重發一次令橫幅再彈。
-    用戶撳咗【確定】或【唔使】→ 通知自動消失 → loop 即刻收工。
-    鎖屏期間重發唔會彈橫幅，但一解鎖下一輪就會彈——唔使額外偵測。
-    上限 12 輪（約 5 分鐘），之後淨留通知喺欄。"""
+def _nav_run_go(job: dict) -> None:
+    """行「開地圖」腳本＋清埋通知。"""
+    script = _nav_go_script_path(job)
+    try:
+        subprocess.run(["sh", script], capture_output=True, timeout=30)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        subprocess.run(["termux-notification-remove", f"nav{job.get('id', 0)}"],
+                       capture_output=True, timeout=6)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _nav_dialog_task(job: dict) -> None:
+    """彈窗確認任務：彈窗等用戶撳；撳【是】→ 開地圖；【否】→ 清通知收工。
+    鎖屏時彈窗活動照起，解鎖後個窗仲喺度等撳——唔會錯過。"""
+    loop = asyncio.get_event_loop()
+    try:
+        ans = await loop.run_in_executor(None, _nav_dialog_block, job)
+    except Exception:  # noqa: BLE001
+        return
     nid = f"nav{job.get('id', 0)}"
-    for _ in range(12):
-        await asyncio.sleep(25)
+    if ans == "yes":
+        _nav_run_go(job)
+    else:
         try:
-            ok, out = _adb_shell(f'dumpsys notification --noredact | grep -c "tag={nid}"')
-            if not ok or not out.strip().isdigit() or int(out.strip()) == 0:
-                return                        # 通知冇咗 = 用戶已經撳咗掣／清咗
             subprocess.run(["termux-notification-remove", nid],
                            capture_output=True, timeout=6)
-            await asyncio.sleep(0.4)
-            _nav_confirm_notify(job, alert=False)   # 重彈（唔再響）
         except Exception:  # noqa: BLE001
-            return
+            pass
 
 
 def _open_nav(dest: str, mode: str = "r") -> tuple:
@@ -1322,10 +1356,10 @@ async def _fire_later(job: dict, delay: float) -> None:
         if ok:
             if not DRY_RUN:
                 try:
-                    asyncio.create_task(_nav_unlock_watch(job))  # 重彈 loop：每 25 秒彈到你理
+                    asyncio.create_task(_nav_dialog_task(job))  # 真彈窗：撳【是】先開地圖
                 except RuntimeError:
-                    pass                  # 冇 event loop（理論上唔會）就唔跟
-            how = f"開導航去「{label}」——頭條通知彈咗，撳【確定開地圖】先會開"
+                    pass                  # 冇 event loop（理論上唔會）就冇彈窗
+            how = f"開導航去「{label}」——彈窗問緊你，撳【是】先會開地圖"
         else:
             # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
             log.info("導航確認通知失敗，直接開：%s", info[:80])
@@ -2118,11 +2152,11 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
             wok, _winfo = _nav_confirm_notify(fake)
             if wok:
                 try:
-                    asyncio.create_task(_nav_unlock_watch(fake))
+                    asyncio.create_task(_nav_dialog_task(fake))
                 except RuntimeError:
                     pass
                 return (f"🧭 導航去「{shown}」（{_mode_label(mode)}）——"
-                        "頭條通知彈咗，撳【確定開地圖】先會開")
+                        "彈窗問緊你，撳【是】先會開地圖")
         ok, out = _open_nav(dest, mode)
         if ok:
             extra = "（彈窗出唔到，直接開）" if not DRY_RUN else ""

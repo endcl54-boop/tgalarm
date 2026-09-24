@@ -2111,7 +2111,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._shell_priv_exec = lambda s: calls.append(["wake", s]) or (True, "")
         bot._nav_confirm_notify = lambda job: (True, "ok")
         self._fire()
-        self.assertIn("撳【確定開地圖】先會開", sent[0])
+        self.assertIn("撳【是】先會開地圖", sent[0])
         # 淨係得 WAKEUP，冇直接 am start 開地圖
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "wake")
@@ -2206,7 +2206,7 @@ class TestManualNavConfirm(unittest.TestCase):
         bot._nav_confirm_notify = lambda job: (True, "ok")
         bot._open_nav = lambda d, m: opened.append(1) or (True, "")
         r = self._ex("導航 屋企")
-        self.assertIn("撳【確定開地圖】先會開", r)
+        self.assertIn("撳【是】先會開地圖", r)
         self.assertEqual(opened, [])          # 未撳掣 → 唔直接開
 
     def test_notify_fail_direct_open(self):
@@ -2217,100 +2217,81 @@ class TestManualNavConfirm(unittest.TestCase):
         self.assertIn("直接開", r)
 
 
-class TestNavUnlockWatch(unittest.TestCase):
-    """鎖屏到點：解鎖後自動重發通知令頭條重新彈出。"""
+class TestNavDialogTask(unittest.TestCase):
+    """真彈窗確認：termux-dialog confirm，撳【是】先開地圖。"""
 
     def setUp(self):
-        self._shell = bot._adb_shell
-        self._notify = bot._nav_confirm_notify
-        self._unlocked = bot._screen_unlocked
-        self._watch = bot._nav_unlock_watch
         self._run = bot.subprocess.run
-        self._sleep = asyncio.sleep
-
-        async def fast_sleep(_):
-            pass
-        asyncio.sleep = fast_sleep
+        self._block = bot._nav_dialog_block
+        self._runit = bot._nav_run_go
+        self._task = bot._nav_dialog_task
+        self._notify = bot._nav_confirm_notify
 
     def tearDown(self):
-        bot._adb_shell = self._shell
-        bot._nav_confirm_notify = self._notify
-        bot._screen_unlocked = self._unlocked
-        bot._nav_unlock_watch = self._watch
         bot.subprocess.run = self._run
-        asyncio.sleep = self._sleep
+        bot._nav_dialog_block = self._block
+        bot._nav_run_go = self._runit
+        bot._nav_dialog_task = self._task
+        bot._nav_confirm_notify = self._notify
 
     def _job(self):
         return {"id": 3, "type": "nav", "url": "X", "mode": "r",
                 "label": "屋企", "chat_id": 1}
 
-    def test_screen_unlocked_true(self):
-        bot._adb_shell = lambda c: (True, "isKeyguardShowing=false\n  mWakefulness=Awake")
-        self.assertTrue(bot._screen_unlocked())
-
-    def test_screen_locked(self):
-        bot._adb_shell = lambda c: (True, "isKeyguardShowing=true\n  mWakefulness=Awake")
-        self.assertFalse(bot._screen_unlocked())
-
-    def test_screen_off(self):
-        bot._adb_shell = lambda c: (True, "isKeyguardShowing=false\n  mWakefulness=Asleep")
-        self.assertFalse(bot._screen_unlocked())
-
-    def test_adb_dead_means_locked(self):
-        bot._adb_shell = lambda c: (False, "")
-        self.assertFalse(bot._screen_unlocked())
-
-    def test_watch_reposts_while_notification_present(self):
-        # 頭兩輪通知仲喺度（重彈），第三輪冇咗（用戶撳咗）→ 收工
-        counts = iter(["2\n", "1\n", "0\n"])
-        bot._adb_shell = lambda c: (True, next(counts, "0\n"))
-        removed, reposted = [], []
-        bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
-        bot._nav_confirm_notify = lambda job, alert=True: (
-            reposted.append((job["id"], alert)) or (True, "ok"))
+    def _run_task(self):
         loop = asyncio.new_event_loop()
         try:
-            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
+            loop.run_until_complete(bot._nav_dialog_task(self._job()))
         finally:
             loop.close()
-        self.assertEqual(removed, ["termux-notification-remove"] * 2)
-        self.assertEqual(reposted, [(3, False), (3, False)])  # 重彈唔再響
 
-    def test_watch_stops_when_notification_gone(self):
-        bot._adb_shell = lambda c: (True, "0\n")      # 第一輪就冇咗
+    @staticmethod
+    def _result(stdout):
+        return type("R", (), {"stdout": stdout, "stderr": "", "returncode": 0})()
+
+    def test_dialog_yes(self):
+        bot.subprocess.run = lambda cmd, **kw: self._result('{"code":-1,"text":"yes"}')
+        self.assertEqual(bot._nav_dialog_block(self._job()), "yes")
+
+    def test_dialog_no(self):
+        bot.subprocess.run = lambda cmd, **kw: self._result('{"code":0,"text":"no"}')
+        self.assertEqual(bot._nav_dialog_block(self._job()), "no")
+
+    def test_dialog_timeout(self):
+        def boom(cmd, **kw):
+            raise bot.subprocess.TimeoutExpired(cmd, 600)
+        bot.subprocess.run = boom
+        self.assertEqual(bot._nav_dialog_block(self._job()), "timeout")
+
+    def test_dialog_garbage(self):
+        bot.subprocess.run = lambda cmd, **kw: self._result("")
+        self.assertEqual(bot._nav_dialog_block(self._job()), "err")
+
+    def test_task_yes_opens_map(self):
+        bot._nav_dialog_block = lambda job, timeout=600: "yes"
+        ran = []
+        bot._nav_run_go = lambda job: ran.append(job["id"])
+        self._run_task()
+        self.assertEqual(ran, [3])
+
+    def test_task_no_removes_notification(self):
+        bot._nav_dialog_block = lambda job, timeout=600: "no"
         removed = []
         bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
-        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
-        finally:
-            loop.close()
-        self.assertEqual(removed, [])                  # 冇重彈過
+        self._run_task()
+        self.assertEqual(removed, ["termux-notification-remove"])
 
-    def test_watch_stops_when_adb_dead(self):
-        bot._adb_shell = lambda c: (False, "")
-        removed = []
-        bot.subprocess.run = lambda cmd, **kw: removed.append(cmd[0])
-        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(bot._nav_unlock_watch(self._job()))
-        finally:
-            loop.close()
-        self.assertEqual(removed, [])
+    def test_fire_starts_dialog_task(self):
+        started = []
+        bot._nav_confirm_notify = lambda job: (True, "ok")
 
-    def test_fire_starts_watch(self):
-        watched = []
-        bot._nav_confirm_notify = lambda job, alert=True: (True, "ok")
-        async def fake_watch(job):
-            watched.append(job["id"])
-        bot._nav_unlock_watch = fake_watch
+        async def fake_task(job):
+            started.append(job["id"])
+        bot._nav_dialog_task = fake_task
         bot._shell_priv_exec = lambda s: (True, "")
         bot.run_intent = lambda cmd: (True, "")
-        sent = []
+
         async def fake_send(cid, text, label=""):
-            sent.append(text)
             return True
         old_send, old_jobs, old_save, old_dry = (bot._send_safe, bot._jobs,
                                                  bot._save_json, bot.DRY_RUN)
@@ -2330,7 +2311,7 @@ class TestNavUnlockWatch(unittest.TestCase):
                 loop.close()
         finally:
             bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = old_send, old_jobs, old_save, old_dry
-        self.assertEqual(watched, [42])
+        self.assertEqual(started, [42])
 
 
 if __name__ == "__main__":
