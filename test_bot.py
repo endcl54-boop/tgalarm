@@ -2,6 +2,7 @@
 """bot.py 指令解析 + Intent 生成嘅單元測試（唔使 Telegram、唔使 Android 都行到）"""
 import asyncio
 import datetime as dt
+import json
 import os
 import re
 import shutil
@@ -11,6 +12,10 @@ import unittest
 from unittest import mock
 
 import bot
+
+
+async def _ensure_owner_true(update) -> bool:
+    return True
 from bot import (
     _execute,
     _is_yt_url,
@@ -2238,6 +2243,129 @@ class TestNavGoScript(unittest.TestCase):
         self.assertIn("termux-open-url", body)     # ② 零權限兜底
         self.assertIn("--activity-clear-task", body)
         self.assertTrue(os.access(path, os.X_OK))
+
+
+class TestAiMode(unittest.TestCase):
+    """Google AI Mode（SerpAPI）問答。"""
+
+    def setUp(self):
+        self._key = bot._serpapi_key
+        self._owner = bot._ensure_owner
+        self._ai = bot._ai_mode_answer
+        import urllib.request
+        self._urlopen = urllib.request.urlopen
+
+    def tearDown(self):
+        bot._serpapi_key = self._key
+        bot._ensure_owner = self._owner
+        bot._ai_mode_answer = self._ai
+        import urllib.request
+        urllib.request.urlopen = self._urlopen
+
+    @staticmethod
+    class _Resp:
+        def __init__(self, payload):
+            self._p = payload
+
+        def read(self):
+            return json.dumps(self._p).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def test_no_key(self):
+        bot._serpapi_key = lambda: ""
+        ok, msg = bot._ai_mode_answer("x")
+        self.assertFalse(ok)
+        self.assertIn("SERPAPI_KEY", msg)
+
+    def test_success_with_references(self):
+        import urllib.request
+        bot._serpapi_key = lambda: "k"
+        urllib.request.urlopen = lambda url, timeout=90: self._Resp({
+            "text_blocks": [{"type": "paragraph", "snippet": "答案A"},
+                            {"type": "list", "snippet": "答案B"}],
+            "references": [{"title": "來源甲", "link": "http://a"},
+                           {"title": "", "link": ""}]})
+        ok, msg = bot._ai_mode_answer("點去銅鑼灣")
+        self.assertTrue(ok)
+        self.assertIn("答案A", msg)
+        self.assertIn("答案B", msg)
+        self.assertIn("來源甲", msg)
+        self.assertIn("http://a", msg)
+
+    def test_api_error(self):
+        import urllib.request
+        bot._serpapi_key = lambda: "k"
+        urllib.request.urlopen = lambda url, timeout=90: self._Resp(
+            {"error": "quota exceeded"})
+        ok, msg = bot._ai_mode_answer("x")
+        self.assertFalse(ok)
+        self.assertIn("quota", msg)
+
+    def test_empty_answer(self):
+        import urllib.request
+        bot._serpapi_key = lambda: "k"
+        urllib.request.urlopen = lambda url, timeout=90: self._Resp(
+            {"text_blocks": []})
+        ok, _msg = bot._ai_mode_answer("x")
+        self.assertFalse(ok)
+
+    def test_truncation(self):
+        import urllib.request
+        bot._serpapi_key = lambda: "k"
+        urllib.request.urlopen = lambda url, timeout=90: self._Resp(
+            {"text_blocks": [{"snippet": "字" * 6000}]})
+        ok, msg = bot._ai_mode_answer("x")
+        self.assertTrue(ok)
+        self.assertLessEqual(len(msg), 4010)
+        self.assertIn("截", msg)
+
+    def test_message_dispatch(self):
+        replies = []
+
+        class Msg:
+            text = "ai 明天會唔會落雨"
+
+            async def reply_text(self, t):
+                replies.append(t)
+
+        class Upd:
+            message = Msg()
+
+        bot._ensure_owner = _ensure_owner_true
+        bot._ai_mode_answer = lambda q, timeout=90: (True, f"答：{q}")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_message(Upd(), None))
+        finally:
+            loop.close()
+        self.assertEqual(len(replies), 2)          # 「問緊…」＋答案
+        self.assertIn("明天會唔會落雨", replies[1])
+
+    def test_message_dispatch_ask_prefix(self):
+        replies = []
+
+        class Msg:
+            text = "問 邊度有好吃嘅"
+
+            async def reply_text(self, t):
+                replies.append(t)
+
+        class Upd:
+            message = Msg()
+
+        bot._ensure_owner = _ensure_owner_true
+        bot._ai_mode_answer = lambda q, timeout=90: (True, "答")
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_message(Upd(), None))
+        finally:
+            loop.close()
+        self.assertEqual(len(replies), 2)
 
 
 class TestNavDialogTask(unittest.TestCase):

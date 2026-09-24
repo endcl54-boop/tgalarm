@@ -142,6 +142,7 @@ HELP = (
     "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
+    "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
 )
 
 # ---------------- 指令解析 ----------------
@@ -909,6 +910,53 @@ async def _nav_dialog_task(job: dict) -> None:
                            capture_output=True, timeout=6)
         except Exception:  # noqa: BLE001
             pass
+
+
+def _serpapi_key() -> str:
+    """SerpAPI key：環境變數或設定檔（改咗即時生效，唔使重啟）。"""
+    return (os.environ.get("SERPAPI_KEY", "")
+            or _read_config_file().get("SERPAPI_KEY", "")).strip()
+
+
+def _ai_mode_answer(question: str, timeout: int = 90) -> tuple:
+    """問 Google AI Mode（經 SerpAPI），回傳 (ok, 回覆文字)。
+    零依賴（urllib）。end-point：search.json?engine=google_ai_mode。"""
+    import urllib.parse
+    import urllib.request
+    key = _serpapi_key()
+    if not key:
+        return False, ("❌ 未設定 SERPAPI_KEY。\n"
+                       "搞法：喺 ~/.tgalarm/config 加一行 SERPAPI_KEY=你嘅key"
+                       "（唔使重啟）")
+    params = urllib.parse.urlencode(
+        {"engine": "google_ai_mode", "q": question, "api_key": key})
+    url = f"https://serpapi.com/search.json?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001
+        return False, f"❌ 搜尋失敗：{e}"
+    err = data.get("error")
+    if isinstance(err, str) and err:
+        return False, f"❌ SerpAPI：{err}"
+    body = "\n\n".join(
+        (b.get("snippet") or "").strip()
+        for b in (data.get("text_blocks") or [])
+        if (b.get("snippet") or "").strip())
+    if not body:
+        return False, "❓ Google AI Mode 對呢條問題冇答案。"
+    refs = data.get("references") or []
+    ref_lines = []
+    for rf in refs[:5]:
+        title = (rf.get("title") or rf.get("source") or "").strip()
+        link = (rf.get("link") or "").strip()
+        if title and link:
+            ref_lines.append(f"• {title}\n  {link}")
+    if ref_lines:
+        body += "\n\n📚 來源：\n" + "\n".join(ref_lines)
+    if len(body) > 4000:
+        body = body[:3990] + "\n…（太長，截咗）"
+    return True, body
 
 
 def _open_nav(dest: str, mode: str = "r") -> tuple:
@@ -2254,6 +2302,18 @@ async def _on_message(update, context):
     if not update.message or not update.message.text:
         return
     if not await _ensure_owner(update):
+        return
+
+    t = update.message.text.strip()
+    if t.lower().startswith("ai ") or t.startswith("問 "):
+        parts = t.split(None, 1)
+        q = parts[1].strip() if len(parts) > 1 else ""
+        if not q:
+            await update.message.reply_text("用法：ai <問題>（例：ai 旺角去銅鑼灣點去最快？）")
+            return
+        await update.message.reply_text("🔎 問緊 Google AI Mode，可能要十幾秒…")
+        _ok, ans = await asyncio.to_thread(_ai_mode_answer, q)
+        await update.message.reply_text(ans)
         return
 
     now = dt.datetime.now()
