@@ -8,7 +8,7 @@
 
 規則（港式）：1 百搭（數任何面都計）；叫 1 要雙計先等強（2個1≈4個x）；
 同數量入面 1 最大（3個1 > 3個6）；加注要升 rank；開（challenge）攤牌，
-輸家減一粒，清晒五粒輸。
+輸家唔減骰（計分制，用戶規則），記勝場照玩落去。
 """
 import math
 import re
@@ -347,34 +347,21 @@ def user_dice_declare(st, text: str):
         loser = "bot" if bidder == "you" else "you"
     else:
         loser = "you" if bidder == "you" else "bot"
-    if ok:
-        if bidder == "you":
-            st["bot_n"] -= 1
-        else:
-            st["you_n"] -= 1
+    # 計分制（用戶規則 2026-09-26：輸咗唔減骰）
+    if loser == "you":
+        st["bot_wins"] += 1
     else:
-        if bidder == "you":
-            st["you_n"] -= 1
-        else:
-            st["bot_n"] -= 1
+        st["you_wins"] += 1
     verdict = ("✅ 夠數！" if ok else "❌ 唔夠！")
     who = "你" if loser == "you" else "我"
     detail = (f"{'加埋' if f != WILD else '淨計1'}「{f}」共 {cnt} 粒"
               f"（叫 {bid_text(q, f)}）")
     lines = [f"🎬 攤牌！你：{' '.join(map(str, ud))}　我：{' '.join(map(str, bd))}",
-             f"{detail} → {verdict}{who}輸，減一粒。"]
+             f"{detail} → {verdict}{who}輸（唔使減骰）。"
+             f"戰績 你{st['you_wins']}：{st['bot_wins']}我"]
     st["await_dice"] = False
     st["bid"], st["bidder"] = None, None
-    if st["you_n"] == 0 or st["bot_n"] == 0:
-        st["over"] = True
-        if st["bot_n"] == 0:
-            st["you_wins"] += 1
-            lines.append(f"🏆 你贏咗今局！（戰績 你{st['you_wins']}：{st['bot_wins']}我）")
-        else:
-            st["bot_wins"] += 1
-            lines.append(f"🤖 我贏咗今局！（戰績 你{st['you_wins']}：{st['bot_wins']}我）")
-        return "\n".join(lines), True
-    # 新一回合：全重搖，輸家先叫
+    # 新一回合：全重搖，輸家先叫（唔減骰，照玩落去）
     st["bot"] = roll(st["bot_n"])
     st["round"] += 1
     st["turn"] = loser

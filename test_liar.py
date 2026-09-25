@@ -120,23 +120,19 @@ class TestLiarEngine(unittest.TestCase):
 class TestLiarGame(unittest.TestCase):
     """狀態機全流程。"""
 
-    def test_full_game_random_to_completion(self):
+    def test_score_mode_20_rounds_no_elimination(self):
         rng = random.Random(99)
         st = liar.new_game(starter="bot")
         liar.bot_speak_bid(st)                       # bot 先開
-        guard = 0
-        while not st["over"]:
-            guard += 1
-            self.assertLess(guard, 400, "局打唔完（死循環？）")
+        for _ in range(20):
+            self.assertFalse(st["over"])
+            self.assertEqual(st["you_n"] + st["bot_n"], 10)   # 永遠 10 粒
             if st["await_dice"]:
-                # 用戶誠實報：隨機 5 粒
                 ud = "我 " + " ".join(str(rng.randint(1, 6)) for _ in range(5))
                 rep, _ = liar.user_dice_declare(st, ud)
                 self.assertIsNotNone(rep)
                 continue
-            # 用戶：跟引擎建議（當佢識玩）
-            act, bid = liar.decide(st["bot"] and [rng.randint(1, 6)
-                                                  for _ in range(st["you_n"])],
+            act, bid = liar.decide([rng.randint(1, 6) for _ in range(st["you_n"])],
                                    st["you_n"] + st["bot_n"], st["bid"])
             if act == "challenge":
                 r = liar.user_challenge(st)
@@ -144,9 +140,8 @@ class TestLiarGame(unittest.TestCase):
             else:
                 r = liar.user_bid(st, *bid)
                 self.assertIsNotNone(r)
-        self.assertTrue(st["you_n"] == 0 or st["bot_n"] == 0)
-        self.assertIn("戰績", (liar.user_dice_declare(st, "我 1 1 1 1 1")[0]
-                              or "")) if False else None
+        self.assertEqual(st["you_n"] + st["bot_n"], 10)       # 冇人減過骰
+        self.assertGreater(st["you_wins"] + st["bot_wins"], 0) # 有計分
 
     def test_wrong_turn_and_low_raise_rejected(self):
         st = liar.new_game(starter="you")
@@ -171,8 +166,9 @@ class TestLiarGame(unittest.TestCase):
             self.assertIn("打你手骰", rep)
             rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
             self.assertIn("攤牌", rep)
-        # 扣粒：其中一方 -1
-        self.assertIn(st["you_n"] + st["bot_n"], (9,))
+        # 計分制：冇人扣骰，有勝場
+        self.assertEqual(st["you_n"] + st["bot_n"], 10)
+        self.assertGreater(st["you_wins"] + st["bot_wins"], 0)
 
     def test_declare_parse_fail(self):
         st = liar.new_game(starter="you")
