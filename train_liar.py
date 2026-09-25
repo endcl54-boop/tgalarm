@@ -90,7 +90,7 @@ def teacher_label(dice, n_total, cur, slots, mask, rng):
 
 
 def strong_bid(dice, n_total):
-    best_f = max(range(1, 7), key=lambda f: liar.my_count_for(dice, f))
+    best_f = max(range(2, 7), key=lambda f: liar.my_count_for(dice, f))
     c = liar.my_count_for(dice, best_f)
     q = min(max(1, c + (0 if c * 3 >= n_total else 1)), liar.MAX_Q)
     return (q, best_f, False)

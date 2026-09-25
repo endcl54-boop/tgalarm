@@ -14,8 +14,9 @@ def math_act(dice, total, cur, opp=None, jai=False):
     my_n = len(dice)
     n_unk = total - my_n
     if cur:
-        p = liar.p_bid_true(liar.my_count_for(dice, cur[1]), n_unk,
-                            cur[0], cur[1])
+        cj = cur[2] if len(cur) > 2 else False
+        p = liar.p_bid_true(liar.my_count_for(dice, cur[1], cj), n_unk,
+                            cur[0], cur[1], cj)
         if p < 0.42:
             return "challenge", None
     cand = liar.legal_raises(cur, total, jai)
@@ -32,8 +33,9 @@ def bluff_act(dice, total, cur, opp=None, jai=False):
     my_n = len(dice)
     n_unk = total - my_n
     if cur:
-        p = liar.p_bid_true(liar.my_count_for(dice, cur[1]), n_unk,
-                            cur[0], cur[1])
+        cj = cur[2] if len(cur) > 2 else False
+        p = liar.p_bid_true(liar.my_count_for(dice, cur[1], cj), n_unk,
+                            cur[0], cur[1], cj)
         if p < 0.35:
             return "challenge", None
     cand = liar.legal_raises(cur, total, jai)
@@ -46,7 +48,7 @@ def bluff_act(dice, total, cur, opp=None, jai=False):
                                              n_unk, b[0], b[1], b[2]) <= 0.38]
         if bluffy:
             return "bid", rng.choice(bluffy)
-    return math_act(dice, total, cur)
+    return math_act(dice, total, cur, jai=jai)
 
 
 def maniac_act(dice, total, cur, opp=None, jai=False):

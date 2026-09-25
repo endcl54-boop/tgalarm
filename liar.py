@@ -3,6 +3,8 @@
 
 規則（2026-09-26 用戶提供完整版＋計分制）：
   · 1 百搭（唔叫齋時）；叫「齋」之後成個 round 1 唔再百搭
+  · 起手規則（2026-09-26 用戶追加）：唔齋 3 個起、齋 2 個起；
+    1 只做百搭——永遠唔叫得「X個1」
   · 叫牌全序：數量優先；同數量入面 2<3<4<5<6<1；齋版大過非齋同叫
   · 蛇（1-5 或 2-6 順子）：嗰手 5 粒當 0 顆
   · 圍骰（5 粒全同）：該面多算 1 顆（當 6 顆）
@@ -24,6 +26,8 @@ MAX_Q = 15
 CH_VETO_LO = 0.12
 CH_GATE_BASE = 0.45
 CH_GATE_MAX = 0.70
+OPEN_MIN_Q = 3                        # 起手：唔齋 3 個起
+OPEN_MIN_JAI = 2                      # 起手：齋叫 2 個起
 
 # ---------------- 數學層 ----------------
 
@@ -92,14 +96,18 @@ def parse_bid(text: str):
 
 
 def legal_raises(cur, n_total: int, jai_mode: bool = False):
-    """cur=None 或 (q,face,jai)。jai_mode（已有人叫齋）→全部產齋叫。"""
+    """cur=None 或 (q,face,jai)。jai_mode（已有人叫齋）→全部產齋叫。
+    起手底線：唔齋 OPEN_MIN_Q 個起、齋 OPEN_MIN_JAI 個起；
+    1 只做百搭——面 1 永遠唔產（用戶起手規則 2026-09-26）。"""
     r0 = bid_rank(*cur) if cur else -1
     out = []
     for q in range(1, min(MAX_Q, n_total + 2) + 1):
-        for f in (2, 3, 4, 5, 6, 1):
-            for jai in ((False, True) if (f != WILD and not jai_mode)
-                        else ((True,) if jai_mode else (False,))):
-                if bid_rank(q, f, jai) > r0:
+        for f in (2, 3, 4, 5, 6):
+            for jai in ((True,) if jai_mode else (False, True)):
+                if cur:
+                    if bid_rank(q, f, jai) > r0:
+                        out.append((q, f, jai))
+                elif q >= (OPEN_MIN_JAI if jai else OPEN_MIN_Q):
                     out.append((q, f, jai))
     return out
 
@@ -135,7 +143,7 @@ def action_slots(dice, n_total: int, cur, gate_lo: float = CH_VETO_LO,
     slots[2] = ("bid", cand[0])
     slots[3] = ("bid", min(ps, key=lambda x: abs(x[1] - 0.50))[0])
     slots[4] = ("bid", min(ps, key=lambda x: abs(x[1] - 0.28))[0])
-    best_f = max(range(1, 7), key=lambda f: my_count_for(dice, f, jai_mode))
+    best_f = max(range(2, 7), key=lambda f: my_count_for(dice, f, jai_mode))
     strong = [b for b in cand
               if b[1] == best_f
               and b[0] <= my_count_for(dice, best_f, jai_mode) + 1]
@@ -310,6 +318,11 @@ def user_bid(st, q: int, f: int, jai: bool = False):
         return None
     if st["turn"] != "you":
         return "而家未到你叫——我啱啱先叫咗，你開得或者加。"
+    if f == WILD:
+        return "「1」只做百搭，唔叫得 1 ⚠️ 叫 2–6 啦（例：3個4）。"
+    if st["bid"] is None and q < (OPEN_MIN_JAI if jai else OPEN_MIN_Q):
+        return (f"起手規則：唔齋 {OPEN_MIN_Q} 個起、"
+                f"齋叫 {OPEN_MIN_JAI} 個起 ⚠️（例：3個4／2個5齋）")
     if f == WILD and jai:
         jai = False
     if st.get("jai"):
@@ -397,5 +410,5 @@ def user_dice_declare(st, text: str):
     if loser == "bot":
         lines.append(bot_speak_bid(st))
     else:
-        lines.append("你先叫（例：3個4；可以加「齋」）。")
+        lines.append("你先叫（起手 3個起、齋 2個起；例：3個4）。")
     return "\n".join(lines), False

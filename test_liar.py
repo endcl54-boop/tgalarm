@@ -161,7 +161,7 @@ class TestLiarGame(unittest.TestCase):
     def test_wrong_turn_and_low_raise_rejected(self):
         st = liar.new_game(starter="you")
         st["bot"] = [4, 4, 1, 2, 6]                   # 釘骰：bot 會叫唔會亂開
-        r = liar.user_bid(st, 2, 5)
+        r = liar.user_bid(st, 3, 5)
         self.assertIn("我叫", r)                       # bot 回應咗
         r = liar.user_challenge(st)
         self.assertIn("打你手骰", r)                   # bot 叫完→到你，開得
@@ -171,7 +171,7 @@ class TestLiarGame(unittest.TestCase):
     def test_reveal_counts_and_loser(self):
         st = liar.new_game(starter="you")
         st["bot"] = [4, 4, 1, 2, 6]                   # 釘住 bot 骰
-        liar.user_bid(st, 2, 5)                       # 可能 bot 加注或開
+        liar.user_bid(st, 3, 5)                       # 可能 bot 加注或開
         if st["await_dice"]:                          # bot 開咗你
             rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
             self.assertIn("攤牌", rep)
@@ -187,7 +187,7 @@ class TestLiarGame(unittest.TestCase):
 
     def test_declare_parse_fail(self):
         st = liar.new_game(starter="you")
-        liar.user_bid(st, 2, 3)
+        liar.user_bid(st, 3, 3)
         if st["await_dice"]:
             rep, _ = liar.user_dice_declare(st, "我 1 2 3")   # 唔夠 5 粒
             self.assertIsNone(rep)
@@ -205,7 +205,7 @@ class TestOppModel(unittest.TestCase):
         st = liar.new_game(starter="you")
         st["bot"] = [2, 2, 2, 5, 6]
         before = st["u_p_ema"]
-        liar.user_bid(st, 1, 2)          # 高質叫（我手三條2，P 好高）
+        liar.user_bid(st, 3, 2)          # 高質叫（我手三條2，P 好高）
         self.assertGreater(st["u_p_ema"], before)
         st2 = liar.new_game(starter="you")
         st2["bot"] = [2, 2, 2, 5, 6]
@@ -273,7 +273,7 @@ class TestLiarGlue(unittest.TestCase):
     def test_start_bid_challenge_finish(self):
         r = bot._liar_handle(1, "大話")
         self.assertIn("開枱", r)
-        r = bot._liar_handle(1, "2個5")
+        r = bot._liar_handle(1, "3個5")
         self.assertTrue(r)                            # bot 回應（叫/開）
         if bot._LIAR_GAMES[1]["await_dice"]:
             r = bot._liar_handle(1, "我 1 2 3 4 5")
@@ -338,6 +338,56 @@ class TestJaiPai(unittest.TestCase):
         rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
         self.assertIn("注 2 分", rep)
         self.assertEqual(st["you_wins"], 2)
+
+
+class TestOpeningRules(unittest.TestCase):
+    """起手規則（2026-09-26 用戶追加）：唔齋 3 個起、齋 2 個起、1 淨做百搭。"""
+
+    def test_opening_floor_user_side(self):
+        st = liar.new_game(starter="you")
+        r = liar.user_bid(st, 2, 5)
+        self.assertIn("起手", r)
+        self.assertIsNone(st["bid"])                  # 冇落叫
+        r = liar.user_bid(st, 1, 4)
+        self.assertIn("起手", r)
+        r = liar.user_bid(st, 2, 4, jai=True)         # 齋 2 個起＝合法
+        self.assertIn("齋叫生效", r)
+        self.assertTrue(st["jai"])
+        if st["bid"]:
+            self.assertTrue(st["bid"][2])             # bot 跟住都係齋
+
+    def test_ones_never_biddable(self):
+        st = liar.new_game(starter="you")
+        r = liar.user_bid(st, 3, 1)
+        self.assertIn("百搭", r)
+        self.assertIsNone(st["bid"])
+        for cur in (None, (3, 4, False)):
+            for jm in (False, True):
+                c = liar.legal_raises(cur, 10, jai_mode=jm)
+                self.assertTrue(c)
+                self.assertTrue(all(b[1] != 1 for b in c),
+                                f"cur={cur} jai_mode={jm}")
+
+    def test_bot_opening_respects_floors(self):
+        rng = random.Random(7)
+        for _ in range(200):
+            dice = [rng.randint(1, 6) for _ in range(5)]
+            act, bid = liar.decide(dice, 10, None)
+            self.assertEqual(act, "bid")
+            q, f, jai = bid
+            self.assertNotEqual(f, 1)
+            self.assertGreaterEqual(q, liar.OPEN_MIN_JAI if jai
+                                    else liar.OPEN_MIN_Q)
+
+    def test_glue_rejects_low_opening(self):
+        bot._LIAR_GAMES.clear()
+        bot._LIAR_GAMES[11] = liar.new_game(starter="you")
+        r = bot._liar_handle(11, "2個5")
+        self.assertIn("起手", r)
+        self.assertIsNone(bot._LIAR_GAMES[11]["bid"])
+        r = bot._liar_handle(11, "3個5")
+        self.assertTrue(r)
+        bot._LIAR_GAMES.clear()
 
 
 if __name__ == "__main__":
