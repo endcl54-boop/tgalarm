@@ -331,15 +331,26 @@ class TestDayLabel(unittest.TestCase):
 class TestTimerCap(unittest.TestCase):
     """計時硬上限 99999 小時"""
 
+    def setUp(self):
+        self._jobs, self._save, self._arm = bot._jobs, bot._save_json, bot._arm
+        bot._jobs = lambda: []
+        bot._save_json = lambda p, d: None
+        bot._arm = lambda j: None
+
+    def tearDown(self):
+        bot._jobs, bot._save_json, bot._arm = self._jobs, self._save, self._arm
+
     def test_over_99999h_rejected(self):
         p = parse_command("計時 100000小時", NOW)
         self.assertIsNotNone(p)
         self.assertIn("超過計時上限", _execute(p, NOW))
 
-    def test_exactly_99999h_allowed(self):
+    def test_exactly_99999h_creates_bell_job(self):
         p = parse_command("計時 99999小時", NOW)
         self.assertEqual(p.seconds, 99999 * 3600)
-        self.assertNotIn("超過計時上限", _execute(p, NOW))  # 去到 intent 步驟（沙盒冇 am，但唔係上限擋）
+        r = _execute(p, NOW, chat_id=1)
+        self.assertNotIn("超過計時上限", r)
+        self.assertIn("#1", r)                     # 入咗排程（統一 bot 守）
 
 
 class TestPlayerGrammar(unittest.TestCase):
@@ -2444,6 +2455,63 @@ class TestNavDialog(unittest.TestCase):
             loop.close()
         self.assertEqual(len(calls), 2)     # err 之後重彈一次
         self.assertEqual(len(gos), 1)       # 第二次 yes → 開地圖
+
+
+class TestBell(unittest.TestCase):
+    """統一 bot 守：計時/鬧鐘入排程，到點 1 秒計時器即響。"""
+
+    def setUp(self):
+        self._save, self._arm, self._jobs = bot._save_json, bot._arm, bot._jobs
+        self._intent, self._send = bot.run_intent, bot._send_safe
+
+    def tearDown(self):
+        bot._save_json, bot._arm, bot._jobs = self._save, self._arm, self._jobs
+        bot.run_intent, bot._send_safe = self._intent, self._send
+
+    def test_alarm_creates_bell_job(self):
+        bot._jobs = lambda: []
+        saved = []
+        bot._save_json = lambda p, d: saved.append(d)
+        bot._arm = lambda j: None
+        p = parse_command("鬧鐘 0700 起身", NOW)
+        r = _execute(p, NOW, chat_id=42)
+        self.assertIn("⏰ 鬧鐘", r)
+        self.assertIn("#1", r)
+        job = saved[0][0]
+        self.assertEqual(job["type"], "bell")
+        self.assertEqual(job["bell"], "alarm")
+        self.assertEqual(job["label"], "起身")
+        self.assertEqual((job["hh"], job["mm"]), (7, 0))
+
+    def test_fire_bell_rings_1s_and_removes(self):
+        sent, fired, removed = [], [], []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot.run_intent = lambda cmd: fired.append(cmd) or (True, "")
+        bot._send_safe = fake_send
+        bot._jobs = lambda: [{"id": 9, "type": "bell", "bell": "timer",
+                              "hh": 1, "mm": 2, "daily": False, "label": "杯麵",
+                              "chat_id": 1, "next": dt.datetime.now().isoformat(),
+                              "seconds": 0, "url": "", "shuffle": False,
+                              "paused": False}]
+        bot._save_json = lambda p, d: removed.append(d)
+        job = dict(bot._jobs()[0])
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+        finally:
+            loop.close()
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0][6], "1")            # 1 秒計時（即響）
+        self.assertIn("杯麵", fired[0])                # 帶 label
+        self.assertEqual(sent, ["⏰ 杯麵"])
+        self.assertEqual(removed, [[]])               # 用完即刪
+
+    def test_bell_in_listing(self):
+        s = bot._fmt_job_content({"type": "bell", "label": "杯麵"})
+        self.assertIn("杯麵", s)
 
 
 class TestSeries(unittest.TestCase):

@@ -1530,6 +1530,8 @@ def _fmt_job_content(j: dict) -> str:
         return f"導航去「{j['label']}」"
     if j.get("type") == "weather":
         return "天氣簡報"
+    if j.get("type") == "bell":
+        return f"響：{j.get('label') or '時間到'}"
     if j.get("type") == "series":
         return (f"每{(j.get('every') or 0) // 60}分鐘 "
                 f"{j['hh']:02d}:{j['mm']:02d}–{j.get('end_hh', 0):02d}:{j.get('end_mm', 0):02d} "
@@ -1551,7 +1553,7 @@ def _fmt_jobs(now: dt.datetime) -> str:
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
-                "weather": "🌤"}.get(j.get("type"), "🎵")
+                "bell": "⏰", "weather": "🌤"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
         else:
@@ -1601,6 +1603,16 @@ async def _fire_later(job: dict, delay: float) -> None:
     defer_msg = False          # nav 彈窗先行時：訊息喺延遲任務送，唔喺度送
     if jtype == "alloc":
         await _fire_alloc(job)
+        return
+    if jtype == "bell":
+        ok, info = await asyncio.to_thread(
+            run_intent, timer_intent_cmd(1, job.get("label", "")))
+        await _send_safe(job["chat_id"],
+                         (f"⏰ {job.get('label') or '時間到'}" if ok
+                          else f"❌ 響唔到（時鐘 app？）：{info[:120]}"),
+                         "鬧鐘/計時到點")
+        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+        _TASKS.pop(job["id"], None)
         return
     if jtype == "series":
         secs = int(job.get("every") or job.get("seconds") or 60)
@@ -2542,23 +2554,43 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
 
 # ---------------- Telegram handlers（延後 import，等 parser 可以單獨測試） ----------------
 
-def _execute(p: Parsed, now: dt.datetime) -> str:
+def _add_bell(chat_id: int, fire_at: dt.datetime, label: str,
+              bell: str) -> dict:
+    """統一 bot 守（2026-09-25 用戶決定）：計時/計時到/鬧鐘全部入排程，
+    到點 bot 開 1 秒計時器即響。回傳 job。"""
+    jobs = _jobs()
+    jid = max((j["id"] for j in jobs), default=0) + 1
+    job = {"id": jid, "type": "bell", "bell": bell, "hh": fire_at.hour,
+           "mm": fire_at.minute, "daily": False, "label": label,
+           "chat_id": chat_id, "next": fire_at.isoformat(),
+           "seconds": 0, "url": "", "shuffle": False, "paused": False}
+    jobs.append(job)
+    _save_json(JOBS_PATH, jobs)
+    _arm(job)
+    return job
+
+
+def _execute(p: Parsed, now: dt.datetime, chat_id: int = 0) -> str:
     """執行一條已解析指令，回傳結果描述文字。"""
     tag = f"（{p.label}）" if p.label else ""
     tail = "（DRY_RUN 未真正設定）" if DRY_RUN else ""
     if p.kind == "timer":
         if p.seconds > MAX_TIMER_SECONDS:
             return f"⚠️ 超過計時上限 99999 小時（你設咗 {fmt_duration(p.seconds)}），冇設定到"
-        ok, out = run_intent(timer_intent_cmd(p.seconds, p.label))
-        if ok:
+        if DRY_RUN:
             day = day_label(p.fire_at, now)
             when = f"{p.fire_at:%H:%M}" if day == "今日" else f"{day} {p.fire_at:%H:%M}"
             return f"⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響{tail}"
-        return f"❌ 計時器開唔到（多數係時鐘 App 唔支援 SET_TIMER，裝 Google「時鐘」或設 SKIP_UI=0）：{out[:150]}"
-    ok, out = run_intent(alarm_intent_cmd(p.hour, p.minute, p.label))
-    if ok:
+        job = _add_bell(chat_id, p.fire_at, p.label, "timer")
+        day = day_label(p.fire_at, now)
+        when = f"{p.fire_at:%H:%M}" if day == "今日" else f"{day} {p.fire_at:%H:%M}"
+        return (f"⏱ 計時器 {fmt_duration(p.seconds)}{tag} → {when} 響"
+                f"（#{job['id']}，「取消 {job['id']}」可刪）{tail}")
+    if DRY_RUN:
         return f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}{tail}"
-    return f"❌ 鬧鐘開唔到：{out[:150]}"
+    job = _add_bell(chat_id, p.fire_at, p.label, "alarm")
+    return (f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}"
+            f"（#{job['id']}，「取消 {job['id']}」可刪）{tail}")
 
 async def _ensure_owner(update) -> bool:
     """白名單檢查 + 首次使用自動綁定。回傳 True = 可以繼續。"""
@@ -2619,7 +2651,7 @@ async def _on_message(update, context):
         if isinstance(p, PlayerCmd):
             results.append(_execute_player(p, update.effective_chat.id, now))
         elif p:
-            results.append(_execute(p, now))
+            results.append(_execute(p, now, update.effective_chat.id))
         else:
             results.append(f"❓ 睇唔明：{ln}")
 
