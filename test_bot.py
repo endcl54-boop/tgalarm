@@ -2457,6 +2457,98 @@ class TestNavDialog(unittest.TestCase):
         self.assertEqual(len(gos), 1)       # 第二次 yes → 開地圖
 
 
+class TestUtilTools(unittest.TestCase):
+    """小工具：匯率／世界時間／揀／骰仔／密碼／打氣。"""
+
+    def setUp(self):
+        import urllib.request
+        self._urlopen = urllib.request.urlopen
+        self._owner = bot._ensure_owner
+        self._fx = bot._fx_reply
+
+    def tearDown(self):
+        import urllib.request
+        urllib.request.urlopen = self._urlopen
+        bot._ensure_owner = self._owner
+        bot._fx_reply = self._fx
+
+    def test_fx_parse_aliases(self):
+        self.assertEqual(bot._fx_parse("100 美金"), (100.0, "USD"))
+        self.assertEqual(bot._fx_parse("50 日圓"), (50.0, "JPY"))
+        self.assertEqual(bot._fx_parse("12.5 gbp"), (12.5, "GBP"))
+        self.assertIsNone(bot._fx_parse("美金"))
+
+    def test_fx_reply_table_and_convert(self):
+        import urllib.request
+
+        class R:
+            def read(self_):
+                return json.dumps({"rates": {"USD": 1.0, "HKD": 7.8,
+                                             "JPY": 150.0}}).encode()
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+        urllib.request.urlopen = lambda url, timeout=20: R()
+        tbl = bot._fx_reply("")
+        self.assertIn("今日匯率", tbl)
+        conv = bot._fx_reply("100 美金")
+        self.assertIn("780.00 港紙", conv)          # 100 USD × 7.8
+        jpy = bot._fx_reply("150 日圓")
+        self.assertIn("7.80 港紙", jpy)             # 150/150 × 7.8
+
+    def test_fx_network_error(self):
+        import urllib.request
+
+        def boom(url, timeout=20):
+            raise OSError("dead")
+        urllib.request.urlopen = boom
+        self.assertIn("攞唔到", bot._fx_reply(""))
+
+    def test_time_reply_known_and_unknown(self):
+        r = bot._time_reply("東京")
+        self.assertIn("東京", r)
+        self.assertRegex(r, r"\d{1,2}:\d{2}")
+        self.assertIn("用法", bot._time_reply("火星"))
+
+    def test_pick_dice_password(self):
+        r = bot._pick_reply("飲茶/壽司/拉麵")
+        self.assertIn("揀咗：", r)
+        self.assertIn("用法", bot._pick_reply("只有一個"))
+        d = bot._dice_reply("20")
+        self.assertRegex(d, r"🎲 \d+（d20）")
+        p = bot._password_reply("16")
+        self.assertIn("🔐", p)
+        self.assertIn("長度要", bot._password_reply("3"))
+
+    def test_pep_talk(self):
+        self.assertTrue(bot._PEP)
+        self.assertTrue(all(isinstance(x, str) and x for x in bot._PEP))
+
+    def test_dispatch_dice_and_pep(self):
+        replies = []
+
+        class Msg:
+            text = "打氣"
+
+            async def reply_text(self, t):
+                replies.append(t)
+
+        class Upd:
+            message = Msg()
+
+        bot._ensure_owner = _ensure_owner_true
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_message(Upd(), None))
+        finally:
+            loop.close()
+        self.assertEqual(len(replies), 1)
+        self.assertTrue(replies[0].startswith("💪 "))
+
+
 class TestBell(unittest.TestCase):
     """統一 bot 守：計時/鬧鐘入排程，到點 1 秒計時器即響。"""
 

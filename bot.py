@@ -144,6 +144,8 @@ HELP = (
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
+    "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
+    "\n🎲 骰仔（骰仔 20）　🎯 揀 飲茶/壽司/拉麵　🔐 密碼 16　💪 打氣"
     "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
 )
 
@@ -1146,6 +1148,145 @@ def _weather_report() -> tuple:
         return True, "\n".join(lines)
     except (KeyError, IndexError, TypeError, ValueError) as e:
         return False, f"天氣資料格式唔啱：{e}"
+
+
+# ---- 隨問隨答小工具：匯率／世界時間／隨機／密碼／打氣 ----
+_FX_URL = "https://open.er-api.com/v6/latest/{base}"
+_FX_ALIAS = {
+    "USD": ("美金", "美元", "美紙", "us dollar"), "HKD": ("港紙", "港幣", "港銀"),
+    "JPY": ("日圓", "日元"), "CNY": ("人民幣", "人仔", "人民幣"), "EUR": ("歐羅", "欧元"),
+    "GBP": ("英鎊", "英磅"), "TWD": ("台幣", "台币", "新台幣"), "KRW": ("韓圜", "韓元"),
+    "SGD": ("新加坡幣", "坡紙"), "AUD": ("澳元", "澳洲紙"), "CAD": ("加幣", "加拿大紙"),
+    "THB": ("泰銖"), "VND": ("越南盾"), "PHP": ("披索"), "MYR": ("馬幣"),
+}
+
+
+def _fx_code(tok: str) -> str:
+    t = tok.strip().lower()
+    if t in ("hkd", "港紙", "港幣", "港銀"):
+        return "HKD"
+    for code, names in _FX_ALIAS.items():
+        if t in (n.lower() for n in names):
+            return code
+    return t.upper() if re.fullmatch(r"[a-z]{3}", t) else ""
+
+
+def _fx_parse(arg: str):
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(.+)$", arg.strip())
+    if not m:
+        return None
+    return float(m.group(1)), _fx_code(m.group(2))
+
+
+def _fx_reply(arg: str) -> str:
+    """匯率：免 key API（open.er-api.com）。arg 空＝主要貨幣表；否則 金額 幣種。"""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(
+                _FX_URL.format(base="USD"), timeout=20) as r:
+            rates = json.loads(r.read().decode())["rates"]
+        hkd = rates["HKD"]
+    except Exception as e:  # noqa: BLE001
+        return f"❌ 匯率攞唔到：{e}"
+    if not arg.strip():
+        rows = [f"1 {c} = {hkd / rates[c]:.4f} 港紙"
+                for c in ("USD", "EUR", "GBP", "JPY", "CNY", "TWD", "KRW", "SGD")
+                if c in rates]
+        return "💱 今日匯率（兌港紙）：\n" + "\n".join(rows)
+    got = _fx_parse(arg)
+    if not got or not got[1]:
+        return "❓ 用法：匯率 100 美金（或 usd／jpy／歐羅…）"
+    amt, code = got
+    if code not in rates:
+        return f"❓ 唔識「{code}」呢個幣種"
+    if code == "HKD":
+        return f"💱 {amt:g} 港紙 = {amt / hkd:.4f} 美金（參考）"
+    v_hkd = amt / rates[code] * hkd
+    return (f"💱 {amt:g} {_FX_ALIAS.get(code, (code,))[0]} = "
+            f"{v_hkd:,.2f} 港紙（1 {code} = {hkd / rates[code]:.4f} HKD）")
+
+
+# Termux 固 TZPATH 指 /usr/share（唔存在）——指返 PREFIX 下成功
+try:
+    import zoneinfo as _zi
+    _zp = os.path.join(os.environ.get("PREFIX", "/usr"), "share", "zoneinfo")
+    if os.path.isdir(_zp):
+        _zi.reset_tzpath((_zp,))
+except Exception:  # noqa: BLE001
+    pass
+
+_TIME_ZONES = {"東京": "Asia/Tokyo", "首爾": "Asia/Seoul", "上海": "Asia/Shanghai",
+               "北京": "Asia/Shanghai", "台北": "Asia/Taipei", "新加坡": "Asia/Singapore",
+               "曼谷": "Asia/Bangkok", "悉尼": "Australia/Sydney", "雪梨": "Australia/Sydney",
+               "紐約": "America/New_York", "洛杉磯": "America/Los_Angeles",
+               "溫哥華": "America/Vancouver", "倫敦": "Europe/London",
+               "巴黎": "Europe/Paris", "法蘭克福": "Europe/Berlin",
+               "蘇黎世": "Europe/Zurich", "杜拜": "Asia/Dubai"}
+
+
+def _time_reply(arg: str) -> str:
+    from zoneinfo import ZoneInfo
+    z = _TIME_ZONES.get(arg.strip())
+    if not z:
+        return ("❓ 用法：時間 東京／紐約／倫敦／巴黎／悉尼／首爾／新加坡／"
+                "曼谷／杜拜／溫哥華…")
+    try:
+        n = dt.datetime.now(ZoneInfo(z))
+    except Exception:  # noqa: BLE001 — 机內未裝時區資料
+        return "⚠️ 呢部機未裝時區資料（tzdata）——叫 bot 幫手整"
+    return f"🌍 {arg.strip()}而家 {n:%H:%M}（{n:%m月%d日 %a}）"
+
+
+_PEP = [
+    "今日唔知點，聽日繼續嚟過。你已經好叻。",
+    "慢慢嚟，比較快。搞掂一步係一步。",
+    "你冇停過手，已經贏咗尐日日躺平嘅人。",
+    "難搞嘅嘢留返個精神好嘅自己。而家飲啖水先。",
+    "做到七成已經好犀利——剩嗰三成聽日話咁快。",
+    "你而家嘅努力，聽日嘅你會多謝你。",
+    "係咁㗎啦，好開心咁樣啦！行落去就得。",
+    "唔使同人比，同尐日嘅你比已經進咗步。",
+    "放輕鬆，你行到呢度已經唔容易。",
+    "搞定佢，然後獎勵自己好嘢食。",
+    "世界唔會記得你有幾攰，但你個身體會——早啲抖。",
+    "今日係你餘生第一日，隨便你點玩。",
+    "問題大過你？拆開佢，逐件整。",
+    "你已經捱過好多個「搞唔掂」嘅日子，今次都得。",
+    "加油，頂住！你係全場最得嗰個。",
+]
+
+
+def _pick_reply(rest: str) -> str:
+    opts = [o.strip() for o in re.split(r"[/、,，]|定|定係", rest) if o.strip()]
+    if len(opts) < 2:
+        return "❓ 用法：揀 飲茶/壽司/拉麵（用／隔開兩個以上）"
+    import secrets
+    return f"🎯 揀咗：{secrets.choice(opts)}"
+
+
+def _dice_reply(rest: str) -> str:
+    import secrets
+    m = re.fullmatch(r"\s*(\d{1,3})?", rest.strip())
+    faces = int(m.group(1)) if (m and m.group(1)) else 6
+    if not 2 <= faces <= 1000:
+        return "❓ 骰面要 2–1000"
+    return f"🎲 {secrets.randbelow(faces) + 1}（d{faces}）"
+
+
+def _password_reply(rest: str) -> str:
+    import secrets
+    import string
+    m = re.fullmatch(r"\s*(\d{1,3})?", rest.strip())
+    n = int(m.group(1)) if (m and m.group(1)) else 16
+    if not 8 <= n <= 64:
+        return "❓ 長度要 8–64"
+    pools = [string.ascii_lowercase, string.ascii_uppercase,
+             string.digits, "!@#$%^&*-_=+"]
+    allc = "".join(pools)
+    chars = [secrets.choice(p) for p in pools]
+    chars += [secrets.choice(allc) for _ in range(n - len(chars))]
+    secrets.SystemRandom().shuffle(chars)
+    return f"🔐 `{''.join(chars)}`\n（已確保大小寫＋數字＋符號；-copy 去用啦）"
 
 
 def _open_nav(dest: str, mode: str = "r") -> tuple:
@@ -2629,6 +2770,28 @@ async def _on_message(update, context):
         wok, rep = await asyncio.to_thread(_weather_report)
         await update.message.reply_text(("🌤 " + rep) if wok
                                         else f"❌ 天氣攞唔到：{rep[:150]}")
+        return
+    m = re.fullmatch(r"(骰仔|dice)(?:\s+(\d{1,3}))?", t, re.IGNORECASE)
+    if m:
+        await update.message.reply_text(_dice_reply(m.group(2) or ""))
+        return
+    if t.startswith("揀 ") or t.startswith("揀"):
+        await update.message.reply_text(_pick_reply(t[1:].strip()))
+        return
+    if t.startswith("密碼"):
+        await update.message.reply_text(
+            _password_reply(t[2:].replace(" ", "")), parse_mode="Markdown")
+        return
+    if t == "打氣" or t.startswith("打氣 "):
+        await update.message.reply_text("💪 " + _PEP[dt.datetime.now().microsecond % len(_PEP)])
+        return
+    if t.startswith("時間 ") or t == "時間":
+        await update.message.reply_text(_time_reply(t[2:].strip()))
+        return
+    if t.startswith("匯率"):
+        await update.message.reply_text("💱 查緊匯率…")
+        rep = await asyncio.to_thread(_fx_reply, t[2:].strip())
+        await update.message.reply_text(rep)
         return
     if t.lower().startswith("ai ") or t.startswith("問 "):
         parts = t.split(None, 1)
