@@ -1,3 +1,15 @@
 __pycache__/
 *.pyc
 *.bak_*
+bot.log*
+*.log
+# 本機資料（永不入 repo）
+.tgalarm/
+config
+jobs.json
+playlists.json
+destinations.json
+todo.json
+storage/
+rish
+*.apk

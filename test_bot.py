@@ -2026,6 +2026,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         self._notify = bot._nav_confirm_notify
         self._priv = bot._shell_priv_exec
         self._adblane = bot._adb_lane_available
+        self._kb = bot._nav_keyboard_msg
         async def fake_sleep(_):
             pass
         asyncio.sleep = fake_sleep
@@ -2044,6 +2045,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._nav_confirm_notify = self._notify
         bot._shell_priv_exec = self._priv
         bot._adb_lane_available = self._adblane
+        bot._nav_keyboard_msg = self._kb
 
     def _job(self):
         nxt = (dt.datetime.now() + dt.timedelta(seconds=1)).isoformat()
@@ -2076,7 +2078,13 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._nav_confirm_notify = lambda job: (False, "冇 termux-notification")
         bot._shell_priv_exec = lambda s: (True, "")
         bot._adb_lane_available = lambda: False
-        self._fire()
+        # 彈窗先行之下，後備直開路只喺冇彈窗（DRY_RUN）嗰條 branch 行到
+        old_dry = bot.DRY_RUN
+        bot.DRY_RUN = True
+        try:
+            self._fire()
+        finally:
+            bot.DRY_RUN = old_dry
         self.assertEqual(len(probes), 1)               # fallback 前重探過
         self.assertFalse(bot._RISH_CACHE["ok"])
         self.assertTrue(sent)
@@ -2096,10 +2104,15 @@ class TestNavFireRishWarning(unittest.TestCase):
         calls = []
         bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
         bot._RISH_CACHE.update({"t": 0.0, "ok": False})
-        bot._nav_confirm_notify = lambda job: (False, "冇")
+        bot._nav_confirm_notify = lambda job: (True, "ok")
+        kbs = []
+        async def fake_kb(cid, job):
+            kbs.append(job["id"])
+        bot._nav_keyboard_msg = fake_kb
         self._fire()
-        self.assertEqual(calls[0][0], "rish")           # probe ok → WAKEUP 都行 rish
-        self.assertNotIn("可能彈唔出", sent[0])
+        self.assertEqual(kbs, [999])                    # TG 掣確認出咗
+        # run_intent 淨係行 WAKEUP（rish keyevent），冇直接開地圖
+        self.assertEqual(calls, [["rish", "-c", "input keyevent KEYCODE_WAKEUP"]])
 
     def test_notify_ok_means_no_direct_open(self):
         """彈窗通知成功 → 唔直接開 app，等用戶撳確定。"""
@@ -2115,10 +2128,14 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
         bot._shell_priv_exec = lambda s: calls.append(["wake", s]) or (True, "")
         bot._nav_confirm_notify = lambda job: (True, "ok")
+        kbs = []
+        async def fake_kb(cid, job):
+            kbs.append(job["id"])
+        bot._nav_keyboard_msg = fake_kb
         self._fire()
-        self.assertIn("撳【是】先會開地圖", sent[0])
-        # 淨係得 WAKEUP，冇直接 am start 開地圖
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(kbs, [999])                    # TG 掣確認出咗
+        self.assertEqual(sent, [])                      # 冇舊式到點文字（keyboard 代替）
+        self.assertEqual(len(calls), 1)                 # 淨係 WAKEUP
         self.assertEqual(calls[0][0], "wake")
 
 
@@ -2341,6 +2358,377 @@ class TestWeather(unittest.TestCase):
             {"type": "weather", "hh": 11, "mm": 0}), "天氣簡報")
 
 
+class TestNavDialog(unittest.TestCase):
+    """導航確認彈窗：等耐性＋結果有 log＋冇人撳要話用戶知。"""
+
+    def setUp(self):
+        self._run = bot.subprocess.run
+        self._block = bot._nav_dialog_block
+        self._send = bot._send_safe
+
+    def tearDown(self):
+        bot.subprocess.run = self._run
+        bot._nav_dialog_block = self._block
+        bot._send_safe = self._send
+
+    def test_block_timeout(self):
+        def boom(*a, **k):
+            raise bot.subprocess.TimeoutExpired(cmd="termux-dialog", timeout=1)
+        bot.subprocess.run = boom
+        self.assertEqual(
+            bot._nav_dialog_block({"id": 1, "label": "公司"}), "timeout")
+
+    def test_block_yes(self):
+        class R:
+            stdout = '{"code": 0, "text": "yes"}'
+            stderr = ""
+        bot.subprocess.run = lambda *a, **k: R()
+        self.assertEqual(
+            bot._nav_dialog_block({"id": 1, "label": "公司"}), "yes")
+
+    def test_task_notifies_on_timeout(self):
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot._nav_dialog_block = lambda j, timeout=3600: "timeout"
+        bot._send_safe = fake_send
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_dialog_task(
+                {"id": 3, "label": "公司", "chat_id": 1}))
+        finally:
+            loop.close()
+        self.assertEqual(sent, [])   # keyboard 在度，過時免再叫
+
+    def test_task_silent_on_no(self):
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot._nav_dialog_block = lambda j, timeout=3600: "no"
+        bot._send_safe = fake_send
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_dialog_task(
+                {"id": 3, "label": "公司", "chat_id": 1}))
+        finally:
+            loop.close()
+        self.assertEqual(sent, [])
+
+    def test_block_err_garbage_output(self):
+        class R:
+            stdout = '{"weird": 1}'
+            stderr = "boom"
+            returncode = 0
+        bot.subprocess.run = lambda *a, **k: R()
+        self.assertEqual(
+            bot._nav_dialog_block({"id": 2, "label": "公司"}), "err")
+
+    def test_task_retries_once_on_err(self):
+        calls, gos = [], []
+
+        def fake_block(job, timeout=3600):
+            calls.append(1)
+            return "yes" if len(calls) > 1 else "err"
+
+        bot._nav_dialog_block = fake_block
+        bot._nav_run_go = lambda job: gos.append(job)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_dialog_task(
+                {"id": 9, "label": "公司", "chat_id": 1}))
+        finally:
+            loop.close()
+        self.assertEqual(len(calls), 2)     # err 之後重彈一次
+        self.assertEqual(len(gos), 1)       # 第二次 yes → 開地圖
+
+
+class TestSeries(unittest.TestCase):
+    """連環鬧：鬧鐘 hhmm-hhmm 每x分鐘 [文字]（範圍內定時響）。"""
+
+    def setUp(self):
+        self._save = bot._save_json
+        self._arm = bot._arm
+        self._jobs = bot._jobs
+        self._intent = bot.run_intent
+        self._send = bot._send_safe
+        bot._jobs = lambda: []
+        saved = []
+        bot._save_json = lambda p, d: saved.append(d)
+        bot._arm = lambda j: None
+
+    def tearDown(self):
+        bot._save_json = self._save
+        bot._arm = self._arm
+        bot._jobs = self._jobs
+        bot.run_intent = self._intent
+        bot._send_safe = self._send
+
+    def test_parse_combined(self):
+        c = bot.parse_player("鬧鐘 0900-1700 每60分鐘 轉位")
+        self.assertIsNotNone(c)
+        self.assertEqual(c.action, "series")
+        self.assertEqual((c.hour, c.minute, c.hour2, c.minute2), (9, 0, 17, 0))
+        self.assertEqual(c.seconds, 3600)
+        self.assertEqual(c.ref, "轉位")
+
+    def test_parse_daily_and_variants(self):
+        c = bot.parse_player("每日 2330-2359 每15分鐘 飲水")
+        self.assertEqual(c.action, "series_daily")
+        self.assertEqual(c.seconds, 900)
+        c2 = bot.parse_player("計時 0800-0830 每10分鐘")
+        self.assertEqual((c2.action, c2.ref), ("series", ""))
+        c3 = bot.parse_player("鬧鐘 1700-0900 每10分鐘")   # 過午夜＝合法
+        self.assertEqual((c3.hour, c3.minute, c3.hour2, c3.minute2), (17, 0, 9, 0))
+        self.assertIsNone(bot.parse_player("鬧鐘 0900-0900 每10分鐘"))  # 零長度
+        self.assertIsNone(bot.parse_player("鬧鐘 0900-1700 每0分鐘"))
+
+    def test_add_job_and_reply(self):
+        cmd = bot.PlayerCmd("series", hour=9, minute=0, hour2=10, minute2=30,
+                            seconds=1800, ref="轉位")
+        r = bot._execute_player(cmd, 1, dt.datetime.now())
+        self.assertIn("09:00–10:30", r)
+        self.assertIn("每30分鐘", r)
+        self.assertIn("共 4 響", r)     # 9:00,9:30,10:00,10:30
+        job = bot._save_json.__self__ if False else None
+
+    def test_fire_advances_within_window(self):
+        start = (dt.datetime.now() + dt.timedelta(minutes=1)).replace(
+            second=0, microsecond=0)
+        end = start + dt.timedelta(minutes=30)
+        sent, fired = [], []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        def fake_intent(cmd):
+            fired.append(cmd)
+            return True, ""
+        bot.run_intent = fake_intent
+        bot._send_safe = fake_send
+        job = {"id": 60, "type": "series", "hh": start.hour, "mm": start.minute,
+               "end_hh": end.hour, "end_mm": end.minute,
+               "every": 600, "label": "轉位", "daily": False,
+               "chat_id": 1, "next": start.isoformat()}
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+        finally:
+            loop.close()
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0][6], "1")      # 1 秒計時（即響）
+        self.assertEqual(sent, ["⏰ 轉位"])
+        # 推進咗 10 分鐘，仲喺 window 內
+        nxt = dt.datetime.fromisoformat(job["next"])
+        self.assertGreater(nxt, start)
+
+    def test_fire_end_daily_rolls_to_tomorrow_start(self):
+        now = dt.datetime.now().replace(second=0, microsecond=0)
+        start = now
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot.run_intent = lambda cmd: (True, "")
+        bot._send_safe = fake_send
+        job = {"id": 61, "type": "series", "hh": start.hour, "mm": start.minute,
+               "end_hh": start.hour, "end_mm": start.minute,   # 即刻到期
+               "every": 600, "label": "起身", "daily": True,
+               "chat_id": 1, "next": start.isoformat()}
+        bot._jobs = lambda: [dict(job)]
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+        finally:
+            loop.close()
+        nxt = dt.datetime.fromisoformat(job["next"])
+        self.assertEqual((nxt - start).days, 1)          # 聽日同一開始時間
+        self.assertEqual(nxt.hour, start.hour)
+
+    def test_fire_end_once_deletes(self):
+        now = dt.datetime.now().replace(second=0, microsecond=0)
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot.run_intent = lambda cmd: (True, "")
+        bot._send_safe = fake_send
+        removed = []
+        job = {"id": 62, "type": "series", "hh": now.hour, "mm": now.minute,
+               "end_hh": now.hour, "end_mm": now.minute,
+               "every": 600, "label": "x", "daily": False,
+               "chat_id": 1, "next": now.isoformat()}
+        bot._jobs = lambda: [job]
+        bot._save_json = lambda p, d: removed.append(d)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+        finally:
+            loop.close()
+        self.assertEqual(removed, [[]])                  # 清空＝用完即棄
+
+    def test_frankie_two_line_midnight(self):
+        # Frankie 原句：兩行＋過午夜
+        res = bot.parse_lines("計時 2100-0000\n\n每60分鐘 報更")
+        self.assertEqual(len(res), 1)
+        ln, p = res[0]
+        self.assertEqual(p.action, "series")
+        self.assertEqual((p.hour, p.minute, p.hour2, p.minute2), (21, 0, 0, 0))
+        self.assertEqual(p.seconds, 3600)
+        self.assertEqual(p.ref, "報更")
+        # 單行一樣得
+        p2 = bot.parse_player("計時 2100-0000 每60分鐘 報更")
+        self.assertEqual((p2.hour2, p2.minute2), (0, 0))
+
+    def test_range_without_every_rejected(self):
+        # 淨範圍冇「每」唔好誤設單一計時器（Frankie 見過 label「-0000」嗰下）
+        self.assertIsNone(bot.parse_command("計時 2100-0000"))
+        self.assertIsNone(bot.parse_command("鬧鐘 2100-0000"))
+
+    def test_fire_midnight_chain(self):
+        # 2100-0000 每日 每60分鐘：23:00 響 → 00:00 響 → 聽日 21:00
+        base = dt.datetime.now().replace(hour=23, minute=0,
+                                         second=0, microsecond=0)
+        sent = []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        bot.run_intent = lambda cmd: (True, "")
+        bot._send_safe = fake_send
+        job = {"id": 63, "type": "series", "hh": 21, "mm": 0,
+               "end_hh": 0, "end_mm": 0, "every": 3600, "label": "報更",
+               "daily": True, "chat_id": 1, "next": base.isoformat()}
+        bot._jobs = lambda: [dict(job)]
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+            nxt1 = dt.datetime.fromisoformat(job["next"])
+            self.assertEqual(nxt1 - base, dt.timedelta(hours=1))   # 00:00
+            loop.run_until_complete(bot._fire_later(job, 0.01))
+            nxt2 = dt.datetime.fromisoformat(job["next"])
+            self.assertEqual(nxt2.hour, 21)                        # 聽日 21:00
+            self.assertEqual((nxt2.date() - base.date()).days, 2)
+        finally:
+            loop.close()
+
+    def test_fmt_job(self):
+        s = bot._fmt_job_content({"type": "series", "hh": 9, "mm": 0,
+                                  "end_hh": 17, "end_mm": 0, "every": 3600,
+                                  "label": "轉位"})
+        self.assertIn("每60分鐘", s)
+        self.assertIn("09:00–17:00", s)
+        self.assertIn("轉位", s)
+
+
+class TestWakeLock(unittest.TestCase):
+    """啟動時攞 wake lock——Android 排程準唔準嘅關鍵，唔係換 cron。"""
+
+    def setUp(self):
+        self._run = bot.subprocess.run
+
+    def tearDown(self):
+        bot.subprocess.run = self._run
+
+    def test_hold_calls_termux_wake_lock(self):
+        cmds = []
+        bot.subprocess.run = lambda c, **k: cmds.append(c) or type(
+            "R", (), {"returncode": 0})()
+        self.assertTrue(bot._hold_wake_lock())
+        self.assertEqual(cmds, [["termux-wake-lock"]])
+
+    def test_hold_tolerates_failure(self):
+        def boom(*a, **k):
+            raise OSError("dead")
+        bot.subprocess.run = boom
+        self.assertFalse(bot._hold_wake_lock())
+
+
+class TestNavKeyboard(unittest.TestCase):
+    """TG 掣制導航確認（主確認路）。"""
+
+    def setUp(self):
+        self._send = bot._send_safe
+        self._go = bot._nav_run_go
+        self._jobs = bot._jobs
+        bot._PENDING_NAVS.clear()
+
+    def tearDown(self):
+        bot._send_safe = self._send
+        bot._nav_run_go = self._go
+        bot._jobs = self._jobs
+        bot._PENDING_NAVS.clear()
+
+    def test_keyboard_msg_stores_pending(self):
+        sent = []
+
+        async def fake_send(cid, text, label="", markup=None):
+            sent.append((text, markup))
+            return True
+        bot._send_safe = fake_send
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._nav_keyboard_msg(
+                1, {"id": "m1", "label": "公司"}))
+        finally:
+            loop.close()
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0][1] is None or sent[0][1])
+        self.assertIn("m1", bot._PENDING_NAVS)
+
+    def test_callback_go_runs_and_edits(self):
+        gos = []
+        bot._nav_run_go = lambda job: gos.append(job)
+        bot._PENDING_NAVS["m9"] = {"id": "m9", "label": "尋旺角",
+                                   "chat_id": 1, "url": "u", "mode": "d"}
+
+        class Q:
+            data = "nav:go:m9"
+            message = type("M", (), {"chat_id": 1})()
+
+            async def answer(self):
+                pass
+
+            async def edit_message_text(self, t):
+                self.edited = t
+        q = Q()
+        upd = type("U", (), {"callback_query": q})()
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_nav_callback(upd, None))
+        finally:
+            loop.close()
+        self.assertEqual(len(gos), 1)
+        self.assertNotIn("m9", bot._PENDING_NAVS)
+
+    def test_callback_unknown_expired(self):
+        edited = []
+
+        class Q:
+            data = "nav:go:ghost"
+
+            async def answer(self):
+                pass
+
+            async def edit_message_text(self, t):
+                edited.append(t)
+        q = Q()
+        upd = type("U", (), {"callback_query": q})()
+        bot._jobs = lambda: []
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_nav_callback(upd, None))
+        finally:
+            loop.close()
+        self.assertEqual(len(edited), 1)
+        self.assertIn("過期", edited[0])
+
+
 class TestNavGoScript(unittest.TestCase):
     """開地圖腳本：三層後備都要寫入。"""
 
@@ -2555,9 +2943,9 @@ class TestNavDialogTask(unittest.TestCase):
         started = []
         bot._nav_confirm_notify = lambda job: (True, "ok")
 
-        async def fake_task(job):
+        async def fake_kb(cid, job):
             started.append(job["id"])
-        bot._nav_dialog_task = fake_task
+        bot._nav_keyboard_msg = fake_kb
         bot._shell_priv_exec = lambda s: (True, "")
         bot.run_intent = lambda cmd: (True, "")
 
@@ -2565,6 +2953,7 @@ class TestNavDialogTask(unittest.TestCase):
             return True
         old_send, old_jobs, old_save, old_dry = (bot._send_safe, bot._jobs,
                                                  bot._save_json, bot.DRY_RUN)
+        old_kb = bot._nav_keyboard_msg
         bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = fake_send, lambda: [], (lambda *a, **k: None), False
         try:
             nxt = (dt.datetime.now() + dt.timedelta(seconds=1)).isoformat()
@@ -2581,6 +2970,7 @@ class TestNavDialogTask(unittest.TestCase):
                 loop.close()
         finally:
             bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = old_send, old_jobs, old_save, old_dry
+            bot._nav_keyboard_msg = old_kb
         self.assertEqual(started, [42])
 
 

@@ -122,6 +122,7 @@ HELP = (
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
     "⏰ 鬧鐘：\n"
     "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身\n"
+    "・連環鬧：鬧鐘 0900-1700 每60分鐘 轉位；過午夜都得（2100-0000 報更）；可拆兩行寫；頭加「每日」＝日日\n"
     "（後面加文字會變成標籤，例如：計時 10分鐘 杯麵）\n"
     "📦 批次輸入：一次過 send 幾行，每行一個指令\n"
     "　（之後每行淨係打時間都得，會繼承上面嘅計時/鬧鐘）\n"
@@ -307,6 +308,8 @@ def parse_command(text: str, now: dt.datetime | None = None) -> Parsed | None:
     # 2) 鬧鐘 HH:MM [標籤]
     m = re.match(r"^/?(?:鬧鐘|闹钟|alarm)\s*", s)
     if m:
+        if re.match(r"\d{1,2}:?\d{2}\s*[-–—~至到]", s[m.end():]):
+            return None      # 範圍寫法要跟「每x分鐘」：鬧鐘 2100-0000 每60分鐘 報更
         r = _read_hhmm(s[m.end():])
         if not r:
             return None
@@ -317,6 +320,8 @@ def parse_command(text: str, now: dt.datetime | None = None) -> Parsed | None:
     m = re.match(r"^/?(?:計時|计时|timer|countdown)\s*", s)
     if m:
         rest = s[m.end():]
+        if re.match(r"\d{1,2}:?\d{2}\s*[-–—~至到]", rest):
+            return None      # 淨範圍冇「每x分鐘」唔識做（避免誤設單一計時器）
         seconds, end = _parse_duration(rest)
         if seconds > 0:
             return Parsed("timer", seconds, now + dt.timedelta(seconds=seconds), rest[end:].strip())
@@ -338,6 +343,27 @@ _PREFIX_TIMER = re.compile(r"^/?(?:計時到|倒數到|計時|计时|timer|count
 _PREFIX_ALARM = re.compile(r"^/?(?:鬧鐘|闹钟|alarm)", re.IGNORECASE)
 
 
+_SERIES_RANGE = re.compile(
+    r"^(每日|每天|everyday)?\s*(?:鬧鐘|闹钟|alarm|計時|计时|timer)\s+"
+    r"\d{1,2}:?\d{2}\s*[-–—~至到]\s*\d{1,2}:?\d{2}$", re.IGNORECASE)
+_SERIES_EVERY = re.compile(
+    r"^每\s*\d+(?:\.\d+)?\s*(?:分鐘|分钟|分|min)\s*\S*$", re.IGNORECASE)
+
+
+def _merge_series_lines(lines: list) -> list:
+    """兩行寫法（例：計時 2100-0000 ↔ 每60分鐘 報更）合成一條 series。"""
+    out, i = [], 0
+    while i < len(lines):
+        if (i + 1 < len(lines) and _SERIES_RANGE.match(lines[i])
+                and _SERIES_EVERY.match(lines[i + 1])):
+            out.append(lines[i].rstrip() + " " + lines[i + 1].strip())
+            i += 2
+            continue
+        out.append(lines[i])
+        i += 1
+    return out
+
+
 def parse_lines(text: str, now: dt.datetime | None = None) -> list:
     """批次解析，回傳 [(原行, Parsed 或 None), ...]。
 
@@ -347,7 +373,7 @@ def parse_lines(text: str, now: dt.datetime | None = None) -> list:
     """
     now = now or dt.datetime.now()
     out, ctx = [], None
-    for ln in split_commands(text):
+    for ln in _merge_series_lines(split_commands(text)):
         pp = parse_player(ln)
         if pp:
             if pp.action == "todo_add":
@@ -502,6 +528,21 @@ def parse_player(text: str) -> PlayerCmd | None:
             return PlayerCmd("sched_alloc", hour=r1[0], minute=r1[1],
                              hour2=r2[0], minute2=r2[1],
                              buf=b_pct, buf_min=b_min, ref=m.group(5).strip())
+        return None
+    # 連環鬧：[每日] 鬧鐘/計時 hhmm-hhmm 每x分鐘 [文字]
+    m = re.match(r"^(每日|每天|everyday)?\s*(?:鬧鐘|闹钟|alarm|計時|计时|timer)?\s*"
+                 r"(\d{1,2}):?(\d{2})\s*[-–—~至到]\s*(\d{1,2}):?(\d{2})\s*"
+                 r"每\s*(\d+(?:\.\d+)?)\s*(?:分鐘|分钟|分|min)\s*(.*)$", s, re.IGNORECASE)
+    if m and (m.group(1) or m.group(2)):
+        sh, sm = int(m.group(2)), int(m.group(3))
+        eh, em = int(m.group(4)), int(m.group(5))
+        x = float(m.group(6))
+        if (sh <= 23 and sm <= 59 and eh <= 23 and em <= 59
+                and (eh, em) != (sh, sm) and 1 <= x <= 24 * 60):
+            # end < start＝過午夜（例 2100-0000 報更），window 開去第二日
+            return PlayerCmd("series_daily" if m.group(1) else "series",
+                              hour=sh, minute=sm, hour2=eh, minute2=em,
+                              seconds=int(x * 60), ref=m.group(7).strip())
         return None
     # 每日 hhmm <計時 時長 | [隨機]播> [名/連結/標籤]
     m = re.match(r"^(?:每日|每天|everyday)\s*", s, re.IGNORECASE)
@@ -877,6 +918,9 @@ def _nav_dialog_block(job: dict, timeout: int = 600) -> str:
         return "yes"
     if '"no"' in out:
         return "no"
+    logging.info("彈窗#%s → err raw_out=%r raw_err=%r rc=%s",
+                 job.get("id", 0), out[:160], (r.stderr or "")[:160],
+                 getattr(r, "returncode", "?"))
     return "err"
 
 
@@ -894,6 +938,85 @@ def _nav_run_go(job: dict) -> None:
         pass
 
 
+# ---- TG inline keyboard 導航確認 ----
+# 2026-09-25 實測：Telegram 喺前景嗰陣，termux-dialog 會俾人彈交代收
+# （raw code -2）。所以主確認改 TG 按鈕（Telegram 點都搶唔走自己個 chat），
+# 彈窗留返做其他環境嘅快路。_PENDING_NAVS 記住手動導航 job 畀 callback 用。
+_PENDING_NAVS: dict = {}
+
+
+def _nav_keyboard(nid: str):
+    try:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    except ImportError:            # 沘木殫測試環境們 telegram lib
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("\U0001F5FA \u958B\u5730\u5716",
+                             callback_data=f"nav:go:{nid}"),
+        InlineKeyboardButton("\u2716 \u5514\u53bb",
+                             callback_data=f"nav:no:{nid}")]])
+
+
+async def _nav_keyboard_msg(chat_id: int, job: dict) -> None:
+    label = job.get("label") or job.get("url", "")
+    _PENDING_NAVS[str(job["id"])] = job
+    # 順手清理 30 分鐘以上嘅舊 pending
+    now_ts = dt.datetime.now().timestamp()
+    for k in [k for k, v in _PENDING_NAVS.items()
+              if str(v.get("_ts", 0)) and now_ts - v.get("_ts", now_ts) > 1800]:
+        _PENDING_NAVS.pop(k, None)
+    await _send_safe(chat_id,
+                     f"🧭 開導航去「{label}」？撳下面掣",
+                     "\u5c0e\u822a\u78ba\u8a8d", markup=_nav_keyboard(str(job["id"])))
+
+
+async def _on_nav_callback(update, context) -> None:
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _, act, nid = q.data.split(":", 2)
+    except ValueError:
+        return
+    job = _PENDING_NAVS.get(nid)
+    if job is None:
+        for j in _jobs():
+            if str(j.get("id")) == nid and j.get("type") == "nav":
+                job = dict(j)
+                job["chat_id"] = q.message.chat_id
+                break
+    if job is None:
+        try:
+            await q.edit_message_text(
+                "\u23f1 \u5462\u500b\u78ba\u8a8d\u5df2\u904e\u671f\uff0c"
+                "send\u300c\u5c0e\u822a <\u5730\u65b9>\u300d\u518d\u4fc2\u904e")
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if act == "go":
+        await asyncio.to_thread(_nav_run_go, job)
+        try:
+            await q.edit_message_text(
+                f"\U0001F5FA \u5df2\u958b\u5730\u5716\u53bb\u300c{job.get('label')}\u300d")
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            subprocess.run(["termux-notification-remove", f"nav{job.get('id', 0)}"],
+                           capture_output=True, timeout=6)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await q.edit_message_text(
+                "\u2702\u6536\u5de5\uff0c\u5187\u958b\u5730\u5716")
+        except Exception:  # noqa: BLE001
+            pass
+    _PENDING_NAVS.pop(nid, None)
+
+
+# 停用中（2026-09-25 用戶決定：有 TG 掣後唔再用彈窗），函數保留做後備
 async def _nav_dialog_task(job: dict) -> None:
     """彈窗確認任務：彈窗等用戶撳；撳【是】→ 開地圖；【否】→ 清通知收工。
     鎖屏時彈窗活動照起，解鎖後個窗仲喺度等撳——唔會錯過。"""
@@ -902,7 +1025,17 @@ async def _nav_dialog_task(job: dict) -> None:
         ans = await loop.run_in_executor(None, _nav_dialog_block, job)
     except Exception:  # noqa: BLE001
         return
+    if ans == "err":
+        # 好可能啱啱俾通知橫額搶咗焦點——2 秒後重彈一次
+        logging.info("彈窗#%s err——2 秒後重彈一次", job.get("id", 0))
+        await asyncio.sleep(2)
+        try:
+            ans = await loop.run_in_executor(None, _nav_dialog_block, job)
+        except Exception:  # noqa: BLE001
+            return
     nid = f"nav{job.get('id', 0)}"
+    label = job.get("label") or job.get("url", "")
+    logging.info("彈窗#%s → %s（去「%s」）", job.get("id", 0), ans, label)
     if ans == "yes":
         _nav_run_go(job)
     else:
@@ -911,6 +1044,7 @@ async def _nav_dialog_task(job: dict) -> None:
                            capture_output=True, timeout=6)
         except Exception:  # noqa: BLE001
             pass
+        # TG 摳制確認一開始就在度（keyboard）：彈窗過時/開唔到免再叫，log 已錄。
 
 
 def _serpapi_key() -> str:
@@ -1342,14 +1476,15 @@ def _err_kind(e: Exception) -> str:
     return "other"
 
 
-async def _send_safe(chat_id: int, text: str, label: str = "訊息") -> bool:
+async def _send_safe(chat_id: int, text: str, label: str = "訊息",
+                     markup=None) -> bool:
     """到點訊息發送：閃斷退避重試（5s→20s→45s），唔再一碰就 drop。回傳最終成敗。"""
     if _APP is None:
         return False
     last = None
     for i in range(len(_NET_RETRY_BACKOFF)):
         try:
-            await _APP.bot.send_message(chat_id, text)
+            await _APP.bot.send_message(chat_id, text, reply_markup=markup)
             if i:
                 log.info("%s重試後已送出", label)
             return True
@@ -1395,6 +1530,10 @@ def _fmt_job_content(j: dict) -> str:
         return f"導航去「{j['label']}」"
     if j.get("type") == "weather":
         return "天氣簡報"
+    if j.get("type") == "series":
+        return (f"每{(j.get('every') or 0) // 60}分鐘 "
+                f"{j['hh']:02d}:{j['mm']:02d}–{j.get('end_hh', 0):02d}:{j.get('end_mm', 0):02d} "
+                f"{j.get('label') or '時間到'}")
     if j.get("type") == "alloc":
         segs = j.get("segments", [])
         names = "、".join(s["text"] for s in segs)
@@ -1411,7 +1550,7 @@ def _fmt_jobs(now: dt.datetime) -> str:
     lines = ["🗓 排程："]
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
-        icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩",
+        icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
                 "weather": "🌤"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
@@ -1459,8 +1598,48 @@ async def _fire_later(job: dict, delay: float) -> None:
         return
     now = dt.datetime.now()
     jtype = job.get("type", "play")
+    defer_msg = False          # nav 彈窗先行時：訊息喺延遲任務送，唔喺度送
     if jtype == "alloc":
         await _fire_alloc(job)
+        return
+    if jtype == "series":
+        secs = int(job.get("every") or job.get("seconds") or 60)
+        ok, info = await asyncio.to_thread(run_intent,
+                                           timer_intent_cmd(1, job.get("label", "")))
+        msg = (f"⏰ {job.get('label') or '時間到'}" if ok
+               else f"❌ 響唔到（時鐘 app？）：{info[:120]}")
+        await _send_safe(job["chat_id"], msg, "連環鬧")
+        fire_dt = dt.datetime.fromisoformat(job["next"])
+        nxt = fire_dt + dt.timedelta(seconds=secs)
+        we = job.get("window_end")
+        if we:
+            end_dt = dt.datetime.fromisoformat(we)
+        else:
+            span = dt.timedelta(minutes=((job["end_hh"] * 60 + job["end_mm"])
+                                         - (job["hh"] * 60 + job["mm"])) % 1440)
+            end_dt = (fire_dt.replace(hour=job["hh"], minute=job["mm"],
+                                      second=0, microsecond=0) + span)
+            job["window_end"] = end_dt.isoformat()
+        if nxt <= end_dt:
+            new_next = nxt
+        elif job.get("daily"):
+            new_next = (fire_dt + dt.timedelta(days=1)).replace(
+                hour=job["hh"], minute=job["mm"], second=0, microsecond=0)
+            job.pop("window_end", None)     # 聽日重開新 window
+        else:
+            new_next = None
+        if new_next:
+            job["next"] = new_next.isoformat()
+            jobs = _jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["next"] = job["next"]
+            _save_json(JOBS_PATH, jobs)
+            _TASKS.pop(job["id"], None)
+            _arm(job)
+        else:
+            _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+            _TASKS.pop(job["id"], None)
         return
     if jtype == "weather":
         wok, report = await asyncio.to_thread(_weather_report)
@@ -1484,30 +1663,38 @@ async def _fire_later(job: dict, delay: float) -> None:
         how = _fmt_job_content(job)
     elif jtype == "nav":
         label = job.get("label") or job.get("url")
+        defer_msg = False
         if not DRY_RUN:
-            _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 先著螢幕，頭條先彈到
-        ok, info = _nav_confirm_notify(job)
-        if ok:
-            if not DRY_RUN:
-                try:
-                    asyncio.create_task(_nav_dialog_task(job))  # 真彈窗：撳【是】先開地圖
-                except RuntimeError:
-                    pass                  # 冇 event loop（理論上唔會）就冇彈窗
-            how = f"開導航去「{label}」——彈窗問緊你，撳【是】先會開地圖"
+            _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 著螢幕
+            asyncio.create_task(_nav_keyboard_msg(job["chat_id"], job))
+            defer_msg = True
+        if defer_msg:
+            # TG 掣制確認係主路（彈窗已停用：Telegram 前景會攔截佢）
+            ok, info = True, "TG 掣確認"
+            how = f"開導航去「{label}」——撳 TG 掣「🗺 開地圖」先會開"
+
+            async def _nav_late(job=job):
+                await asyncio.sleep(5)     # 掣後聲音提示
+                _nav_confirm_notify(job)
+            asyncio.create_task(_nav_late())
         else:
-            # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
-            log.info("導航確認通知失敗，直接開：%s", info[:80])
-            if shutil.which("rish") and not DRY_RUN:
-                # fire 前強制重探：你可能啱啱喺 Shizuku app 重啟咗 server，
-                # 唔好跟 10 分鐘 TTL 舊快取（每次 fire 至多探一次，JVM 開銷值得）
-                _RISH_CACHE["ok"] = _rish_probe()
-                _RISH_CACHE["t"] = now.timestamp()
-            ok, info = _open_nav(job.get("url") or job.get("label", ""),
-                                 job.get("mode", "d"))
-            how = f"開導航去「{label}」（彈窗通知出唔到，直接開咗）"
-            if not _rish_available() and not _adb_lane_available() and not DRY_RUN:
-                how += ("\n⚠️ Shizuku 同 adb lane 都冇行——導航可能彈唔出！"
-                        "入 Shizuku app 撳「啟動」，或者 send「復活Shizuku」")
+            ok, info = _nav_confirm_notify(job)
+            if ok:
+                how = f"開導航去「{label}」——彈窗問緊你，撳【是】先會開地圖"
+            else:
+                # 通知路出唔到（例如 Termux:API 冇反應）→ 退返舊路直接開
+                log.info("導航確認通知失敗，直接開：%s", info[:80])
+                if shutil.which("rish"):
+                    # fire 前強制重探：你可能啱啱喺 Shizuku app 重啟咗 server，
+                    # 唔好跟 10 分鐘 TTL 舊快取（每次 fire 至多探一次，JVM 開銷值得）
+                    _RISH_CACHE["ok"] = _rish_probe()
+                    _RISH_CACHE["t"] = now.timestamp()
+                ok, info = _open_nav(job.get("url") or job.get("label", ""),
+                                     job.get("mode", "d"))
+                how = f"開導航去「{label}」（彈窗通知出唔到，直接開咗）"
+                if not _rish_available() and not _adb_lane_available():
+                    how += ("\n⚠️ Shizuku 同 adb lane 都冇行——導航可能彈唔出！"
+                            "入 Shizuku app 撳「啟動」，或者 send「復活Shizuku」")
     else:
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"
@@ -1517,7 +1704,8 @@ async def _fire_later(job: dict, delay: float) -> None:
         msg = f"⏰ 到點！{how}"
     else:
         msg = f"❌ 排程執行失敗：{info[:150]}" + (_BAL_TIP if _is_bal_denied(info) else "")
-    await _send_safe(job["chat_id"], msg, "排程到點訊息")
+    if not defer_msg:
+            await _send_safe(job["chat_id"], msg, "排程到點訊息")
     if job.get("daily"):
         job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
         jobs = _jobs()
@@ -1783,7 +1971,9 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
     """新增排程；同類型同時間嘅舊排程會被取代。回傳 (job, 被取代嘅 id 列表)。"""
     is_timer = cmd.action in ("sched_timer", "sched_timer_daily")
     is_nav = cmd.action in ("sched_nav", "sched_nav_daily")
-    jtype = "timer" if is_timer else ("nav" if is_nav else "play")
+    is_series = cmd.action in ("series", "series_daily")
+    jtype = ("series" if is_series
+             else ("timer" if is_timer else ("nav" if is_nav else "play")))
     jobs = _jobs()
     # 去重：同類型 + 同 hh:mm  collide → 取代舊嘅
     replaced = [j["id"] for j in jobs
@@ -1795,7 +1985,7 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
     jobs = [j for j in jobs if j["id"] not in replaced]
 
     jid = max((j["id"] for j in jobs), default=0) + 1
-    if is_timer:
+    if is_timer or is_series:
         default_label = ""
     elif is_nav:
         default_label = "目的地"
@@ -1803,11 +1993,16 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
         default_label = _playlists().get("default") or "歌單"
     first = _next_occurrence(now, cmd.hour, cmd.minute)
     job = {"id": jid, "type": jtype, "hh": cmd.hour, "mm": cmd.minute,
-           "daily": cmd.action in ("sched_daily", "sched_timer_daily", "sched_nav_daily"),
+           "daily": cmd.action in ("sched_daily", "sched_timer_daily",
+                                   "sched_nav_daily", "series_daily"),
            "url": url, "seconds": seconds, "mode": mode,
            "label": label or cmd.ref or default_label,
            "chat_id": chat_id, "next": first.isoformat(),
            "shuffle": cmd.shuffle, "paused": False}
+    if is_series:
+        job["end_hh"] = cmd.hour2
+        job["end_mm"] = cmd.minute2
+        job["every"] = seconds
     jobs.append(job)
     _save_json(JOBS_PATH, jobs)
     _arm(job)
@@ -2123,6 +2318,16 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         shuf = " 🔀隨機" if cmd.shuffle else ""
         msg = f"🗓 已排程（{kind}{shuf} #{job['id']}）：{when} 播「{job['label']}」"
         return msg + _replaced_note(replaced)
+    if a in ("series", "series_daily"):
+        job, replaced = _add_job(cmd, chat_id, now, seconds=cmd.seconds)
+        kind = "每日" if a == "series_daily" else "今日"
+        span = ((cmd.hour2 * 60 + cmd.minute2)
+                - (cmd.hour * 60 + cmd.minute)) % 1440
+        n = span * 60 // cmd.seconds + 1
+        msg = (f"⏰ 已排連環鬧（{kind} #{job['id']}）："
+               f"{cmd.hour:02d}:{cmd.minute:02d}–{cmd.hour2:02d}:{cmd.minute2:02d} "
+               f"每{cmd.seconds // 60}分鐘 響「{job['label'] or '時間到'}」（共 {n} 響）")
+        return msg + _replaced_note(replaced)
     if a in ("sched_timer", "sched_timer_daily"):
         job, replaced = _add_job(cmd, chat_id, now, seconds=cmd.seconds)
         kind = "每日" if a == "sched_timer_daily" else "一次"
@@ -2280,15 +2485,22 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     if a == "nav":
         dest, mode, shown = _nav_target(cmd.ref)
         if not DRY_RUN:
-            # 同到點排程一樣：先彈確認通知，撳【確定開地圖】先開
+            # 同到點排程一樣：彈窗先行；通知＋TG 訊息遲 3 秒——
+            # 同一秒出會搶焦點攬死彈窗（2026-09-25 用戶實測 Telegram 橫額會攔截）
             fake = {"id": f"m{int(now.timestamp()) % 100000}", "type": "nav",
                     "url": dest, "mode": mode, "label": shown, "chat_id": chat_id}
+            try:
+                asyncio.create_task(_nav_keyboard_msg(chat_id, fake))
+
+                async def _manual_nav_late(fake=fake):
+                    await asyncio.sleep(5)
+                    _nav_confirm_notify(fake)   # 聲＋震提示
+                asyncio.create_task(_manual_nav_late())
+                return ""      # 確認就係 TG 掣個訊息，免重複
+            except RuntimeError:
+                pass           # 冇 running loop（同步測試）→ 落返下面後備
             wok, _winfo = _nav_confirm_notify(fake)
             if wok:
-                try:
-                    asyncio.create_task(_nav_dialog_task(fake))
-                except RuntimeError:
-                    pass
                 return (f"🧭 導航去「{shown}」（{_mode_label(mode)}）——"
                         "彈窗問緊你，撳【是】先會開地圖")
         ok, out = _open_nav(dest, mode)
@@ -2414,7 +2626,21 @@ async def _on_message(update, context):
     reply = "\n".join(results)
     if len(items) == 1 and results[0].startswith("❓"):
         reply += "\n\n" + HELP  # 單行失敗先彈完整格式說明，批次就逐行標示
-    await update.message.reply_text(reply)
+    if reply.strip():
+        await update.message.reply_text(reply)
+
+
+def _hold_wake_lock() -> bool:
+    """攞 Android wake lock：唔俾系統凍結計時器（呢樣先係 Android 準唔準嘅關鍵，
+    換 cron 都救唔到 Doze 凍結）。2026-09-25 加：之前一直冇攞。"""
+    try:
+        r = subprocess.run(["termux-wake-lock"], capture_output=True, timeout=10)
+        ok = r.returncode == 0
+        log.info("wake lock %s", "攞到" if ok else f"攞唔到 rc={getattr(r, 'returncode', '?')}")
+        return ok
+    except Exception as e:  # noqa: BLE001
+        log.info("wake lock 攞唔到：%s", e)
+        return False
 
 
 def main():
@@ -2430,10 +2656,17 @@ def main():
     app.add_handler(CommandHandler("start", _on_start))
     app.add_handler(CommandHandler("help", _on_start))
     app.add_handler(CallbackQueryHandler(_on_todo_callback, pattern=r"^todo:"))
+    app.add_handler(CallbackQueryHandler(_on_nav_callback, pattern=r"^nav:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_message))
     app.add_error_handler(_on_error)
     log.info("Bot 啟動（長輪詢模式，DRY_RUN=%s，config=%s）", DRY_RUN, CONFIG_PATH)
+    if not DRY_RUN:
+        _hold_wake_lock()
     app.run_polling(drop_pending_updates=True)
+    try:
+        subprocess.run(["termux-wake-unlock"], capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 if __name__ == "__main__":
