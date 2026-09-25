@@ -58,22 +58,26 @@ def teacher_label(dice, n_total, cur, slots, mask, rng):
     my_n = len(dice)
     n_unk = n_total - my_n
     if not cur:
-        pmap = {i: liar.p_bid_true(liar.my_count_for(dice, slots[i][1][1]),
-                                   n_unk, slots[i][1][0], slots[i][1][1])
+        pmap = {i: liar.p_bid_true(liar.my_count_for(dice, slots[i][1][1],
+                                                     slots[i][1][2]),
+                                   n_unk, slots[i][1][0], slots[i][1][1],
+                                   slots[i][1][2])
                 for i in legal if slots[i][0] == "bid"}
         best = max(pmap, key=lambda i: pmap[i])
         # 有強牌叫強牌（跟手），否則最穩
         for i in legal:
-            if slots[i][0] == "bid" and slots[i][1] == strong_bid(dice, n_total):
+            if slots[i][0] == "bid" and tuple(slots[i][1]) == strong_bid(dice, n_total):
                 return i if pmap[i] > 0.55 else best
         return best
-    p = liar.p_bid_true(liar.my_count_for(dice, cur[1]), n_unk,
-                        cur[0], cur[1])
+    p = liar.p_bid_true(liar.my_count_for(dice, cur[1], cur[2]), n_unk,
+                        cur[0], cur[1], cur[2])
     if p < 0.42:
         return 0 if mask[0] else max((i for i in legal if slots[i][0] == "bid"),
                                      key=lambda i: liar.p_bid_true(
-                                         liar.my_count_for(dice, slots[i][1][1]),
-                                         n_unk, slots[i][1][0], slots[i][1][1]))
+                                         liar.my_count_for(dice, slots[i][1][1],
+                                                           slots[i][1][2]),
+                                         n_unk, slots[i][1][0], slots[i][1][1],
+                                         slots[i][1][2]))
     # 開人唔著數：叫最穩；12% 機會中庸（少少奸）
     if rng.random() < 0.12:
         for i in legal:
@@ -89,7 +93,7 @@ def strong_bid(dice, n_total):
     best_f = max(range(1, 7), key=lambda f: liar.my_count_for(dice, f))
     c = liar.my_count_for(dice, best_f)
     q = min(max(1, c + (0 if c * 3 >= n_total else 1)), liar.MAX_Q)
-    return q, best_f
+    return (q, best_f, False)
 
 
 def forward_np(X, W1, B1, W2, B2):
@@ -174,9 +178,9 @@ def train():
                 opp = [rng.randint(1, 6) for _ in
                        range(st["nb"] if who == "you" else st["ny"])]
                 mine = st["you"] if who == "you" else st["bot"]
-                q, f = st["bid"]
+                q, f, jai_b = st["bid"]
                 cnt = sum(1 for d in list(mine) + opp
-                          if d == f or (f != 1 and d == 1))
+                          if d == f or (not jai_b and f != 1 and d == 1))
                 ok = cnt >= q
                 bidder = "bot" if who == "you" else "you"
                 if ok:
@@ -188,11 +192,14 @@ def train():
                 else:
                     st["nb"] -= 1
                 st["bid"] = None
+                st["jai"] = False
                 st["turn"] = loser
                 st["you"] = [rng.randint(1, 6) for _ in range(st["ny"])]
                 st["bot"] = [rng.randint(1, 6) for _ in range(st["nb"])]
             else:
                 st["bid"] = bid
+                if bid[2]:
+                    st["jai"] = True
                 st["turn"] = "bot" if who == "you" else "you"
         nn_win = (st["nb"] == 0) if first == "nn" else (st["ny"] == 0)
         if nn_win:

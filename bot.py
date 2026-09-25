@@ -146,7 +146,7 @@ HELP = (
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
     "\n🎲 骰仔（骰仔 20）　🎯 揀 飲茶/壽司/拉麵　🔐 密碼 16　💪 打氣"
-    "🎲 大話骰：「大話」開枱，3個4 叫牌，「開！」攤牌（1 百搭；輸咗唔減骰，計分制）"
+    "🎲 大話骰：「大話」開枱，3個4 叫牌，「開！」攤牌（1 百搭；計分制）「3個4齋」齋叫「劈」雙倍"
     "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
 )
 
@@ -1195,6 +1195,8 @@ def _liar_handle(chat_id: int, t: str):
         return _liar.user_bid(st, *bid)
     if t in ("開", "開！", "開!", "大話!", "大話！"):
         return _liar.user_challenge(st)
+    if t in ("劈", "劈！"):
+        return _liar.user_challenge(st, stake=2)
     if st["turn"] == "you" and st["bid"] and not re.match(
             r"^天氣|排程|幫助|help|時間 |匯率|問 |ai |", t):
         return ("睇唔明——叫牌（例：3個4）、"

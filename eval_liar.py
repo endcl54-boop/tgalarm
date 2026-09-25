@@ -10,7 +10,7 @@ import sys
 import liar
 
 
-def math_act(dice, total, cur, opp=None):
+def math_act(dice, total, cur, opp=None, jai=False):
     my_n = len(dice)
     n_unk = total - my_n
     if cur:
@@ -18,15 +18,15 @@ def math_act(dice, total, cur, opp=None):
                             cur[0], cur[1])
         if p < 0.42:
             return "challenge", None
-    cand = liar.legal_raises(cur, total)
+    cand = liar.legal_raises(cur, total, jai)
     if not cand:
         return "challenge", None
     best = max(cand, key=lambda b: liar.p_bid_true(
-        liar.my_count_for(dice, b[1]), n_unk, b[0], b[1]))
+        liar.my_count_for(dice, b[1], b[2]), n_unk, b[0], b[1], b[2]))
     return "bid", best
 
 
-def bluff_act(dice, total, cur, opp=None):
+def bluff_act(dice, total, cur, opp=None, jai=False):
     """人類吹水佬：三成機會吹大（期望+1～+2），否則照數學叫。"""
     rng = random
     my_n = len(dice)
@@ -36,28 +36,28 @@ def bluff_act(dice, total, cur, opp=None):
                             cur[0], cur[1])
         if p < 0.35:
             return "challenge", None
-    cand = liar.legal_raises(cur, total)
+    cand = liar.legal_raises(cur, total, jai)
     if not cand:
         return "challenge", None
     if rng.random() < 0.30:
         # 吹：搵個 P≈0.2-0.35 嘅位
         bluffy = [b for b in cand
-                  if 0.12 <= liar.p_bid_true(liar.my_count_for(dice, b[1]),
-                                             n_unk, b[0], b[1]) <= 0.38]
+                  if 0.12 <= liar.p_bid_true(liar.my_count_for(dice, b[1], b[2]),
+                                             n_unk, b[0], b[1], b[2]) <= 0.38]
         if bluffy:
             return "bid", rng.choice(bluffy)
     return math_act(dice, total, cur)
 
 
-def maniac_act(dice, total, cur, opp=None):
+def maniac_act(dice, total, cur, opp=None, jai=False):
     """狂徒：永遠加最少，P<0.5 就開。"""
     if cur:
         n_unk = total - len(dice)
-        p = liar.p_bid_true(liar.my_count_for(dice, cur[1]), n_unk,
-                            cur[0], cur[1])
+        p = liar.p_bid_true(liar.my_count_for(dice, cur[1], cur[2]), n_unk,
+                            cur[0], cur[1], cur[2])
         if p < 0.50:
             return "challenge", None
-    cand = liar.legal_raises(cur, total)
+    cand = liar.legal_raises(cur, total, jai)
     if not cand:
         return "challenge", None
     return "bid", cand[0]
@@ -71,17 +71,17 @@ def play_game(bot_first: bool, opp_fn, rng) -> bool:
           "bot": [rng.randint(1, 6) for _ in range(5)],
           "ny": 5, "nb": 5, "bid": None,
           "u_bids": 0, "u_false": 0.0, "u_calls": 0, "u_folds": 0,
-          "u_p_ema": 0.5,
+          "u_p_ema": 0.5, "jai": False, "stake": 1,
           "turn": "you" if bot_first else "bot"}
     while st["ny"] and st["nb"]:
         total = st["ny"] + st["nb"]
         if st["turn"] == "you":                      # 對手行 you 側
-            act, bid = opp_fn(st["you"], total, st["bid"])
+            act, bid = opp_fn(st["you"], total, st["bid"], None, st.get("jai", False))
             if act == "challenge":
                 st["u_calls"] += 1
-                q, f = st["bid"]
-                cnt = sum(1 for d in st["you"] + st["bot"]
-                          if d == f or (f != 1 and d == 1))
+                q, f, jai = st["bid"]
+                cnt = (liar.hand_contribution(st["you"], f, jai)
+                       + liar.hand_contribution(st["bot"], f, jai))
                 ok = cnt >= q
                 if not ok:
                     st["u_false"] = 0.7 * st["u_false"] + 0.3 * 1.0
@@ -91,10 +91,12 @@ def play_game(bot_first: bool, opp_fn, rng) -> bool:
                 loser = "you" if ok else "bot"
             else:
                 st["u_folds"] += 1
+                if bid[2]:
+                    st["jai"] = True
                 import liar as L
                 st["u_p_ema"] = 0.7 * st.get("u_p_ema", 0.5) + 0.3 * L.p_bid_true(
-                    L.my_count_for(st["bot"], bid[1]),
-                    st["ny"] + st["nb"] - len(st["bot"]), bid[0], bid[1])
+                    L.my_count_for(st["bot"], bid[1], bid[2]),
+                    st["ny"] + st["nb"] - len(st["bot"]), bid[0], bid[1], bid[2])
                 st["bid"] = bid
                 loser = None
                 st["turn"] = "bot"
@@ -102,15 +104,18 @@ def play_game(bot_first: bool, opp_fn, rng) -> bool:
             opp = {"bluff": st["u_false"], "calls": st["u_calls"],
                    "folds": st["u_folds"], "bids": st["u_bids"],
                    "p_ema": st["u_p_ema"]}
-            act, bid = liar.decide(st["bot"], total, st["bid"], opp)
+            act, bid = liar.decide(st["bot"], total, st["bid"], opp,
+                                   st.get("jai", False))
             if act == "challenge":
-                q, f = st["bid"]
-                cnt = sum(1 for d in st["you"] + st["bot"]
-                          if d == f or (f != 1 and d == 1))
+                q, f, jai = st["bid"]
+                cnt = (liar.hand_contribution(st["you"], f, jai)
+                       + liar.hand_contribution(st["bot"], f, jai))
                 ok = cnt >= q
                 loser = "bot" if ok else "you"
             else:
                 st["bid"] = bid
+                if bid[2]:
+                    st["jai"] = True
                 loser = None
                 st["turn"] = "you"
         if loser:
@@ -119,6 +124,7 @@ def play_game(bot_first: bool, opp_fn, rng) -> bool:
             else:
                 st["nb"] -= 1
             st["bid"] = None
+            st["jai"] = False
             st["turn"] = loser
             st["you"] = [rng.randint(1, 6) for _ in range(st["ny"])]
             st["bot"] = [rng.randint(1, 6) for _ in range(st["nb"])]

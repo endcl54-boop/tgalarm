@@ -38,9 +38,14 @@ class TestLiarMath(unittest.TestCase):
         self.assertGreater(liar.p_bid_true(0, 6, 2, 4),
                            liar.p_bid_true(0, 6, 2, 1))
 
-    def test_my_count_wilds(self):
+    def test_my_count_wilds_straight_quint(self):
         self.assertEqual(liar.my_count_for([1, 1, 4, 4, 6], 4), 4)
         self.assertEqual(liar.my_count_for([1, 2, 3], 1), 1)  # 淨計1
+        self.assertEqual(liar.my_count_for([1, 4, 4], 4, True), 2)  # 齋
+        self.assertEqual(liar.hand_contribution([1, 2, 3, 4, 5], 4), 0)  # 蛇
+        self.assertEqual(liar.hand_contribution([2, 3, 4, 5, 6], 1), 0)
+        self.assertEqual(liar.hand_contribution([3, 3, 3, 3, 3], 3), 6)  # 圍骰
+        self.assertEqual(liar.hand_contribution([3, 3, 3, 3, 3], 5), 0)
 
 
 class TestLiarBids(unittest.TestCase):
@@ -51,19 +56,29 @@ class TestLiarBids(unittest.TestCase):
         self.assertLess(liar.bid_rank(3, 6), liar.bid_rank(3, 1))   # 1 最大
         self.assertLess(liar.bid_rank(3, 1), liar.bid_rank(4, 2))
         self.assertLess(liar.bid_rank(2, 1), liar.bid_rank(3, 2))
+        # 齋版插喺非齋同面同非齋下一面中間
+        self.assertLess(liar.bid_rank(3, 4, False), liar.bid_rank(3, 4, True))
+        self.assertLess(liar.bid_rank(3, 4, True), liar.bid_rank(3, 5, False))
 
     def test_parse_bid(self):
-        self.assertEqual(liar.parse_bid("3個4"), (3, 4))
-        self.assertEqual(liar.parse_bid(" 12個6！"), (12, 6))
+        self.assertEqual(liar.parse_bid("3個4"), (3, 4, False))
+        self.assertEqual(liar.parse_bid(" 12個6！"), (12, 6, False))
+        self.assertEqual(liar.parse_bid("3個4齋"), (3, 4, True))
+        self.assertEqual(liar.parse_bid("3個4 齋"), (3, 4, True))
+        self.assertEqual(liar.parse_bid("3個1齋"), (3, 1, False))  # 1冇齋
         self.assertIsNone(liar.parse_bid("30個4"))
         self.assertIsNone(liar.parse_bid("3個7"))
         self.assertIsNone(liar.parse_bid("34"))
 
     def test_legal_raises_chain(self):
-        seq = [(2, 4), (2, 5), (2, 6), (2, 1), (3, 2), (3, 4), (4, 6), (4, 1)]
+        seq = [(2, 4, False), (2, 5, False), (2, 6, False), (2, 1, False),
+               (3, 2, False), (3, 4, True), (4, 6, True), (4, 1, True)]
         for a, b in zip(seq, seq[1:]):
             self.assertLess(liar.bid_rank(*a), liar.bid_rank(*b),
                             f"{a} 應細過 {b}")
+        # 齋 mode：產出全部齋
+        c = liar.legal_raises((3, 4, True), 10, jai_mode=True)
+        self.assertTrue(all(b[2] for b in c))
 
 
 class TestLiarEngine(unittest.TestCase):
@@ -97,11 +112,11 @@ class TestLiarEngine(unittest.TestCase):
             if act == "challenge":
                 self.assertIsNotNone(cur)
             else:
-                self.assertEqual(len(bid), 2)
-                q, f = bid
+                self.assertEqual(len(bid), 3)
+                q, f, jai = bid
                 self.assertTrue(1 <= q <= liar.MAX_Q and 1 <= f <= 6)
                 if cur:
-                    self.assertGreater(liar.bid_rank(q, f),
+                    self.assertGreater(liar.bid_rank(q, f, jai),
                                        liar.bid_rank(*cur))
 
     def test_decide_speed(self):
@@ -227,9 +242,9 @@ class TestOppModel(unittest.TestCase):
         seen = {}
         orig = liar.action_slots
 
-        def spy(d, n, c, lo=0.12, hi=0.75):
-            seen["hi"] = hi
-            return orig(d, n, c, lo, hi)
+        def spy(*a, **k):
+            seen["hi"] = a[4] if len(a) > 4 else k.get("gate_hi")
+            return orig(*a, **k)
         liar.action_slots = spy
         try:
             liar.decide(dice, total, None,
@@ -281,6 +296,48 @@ class TestLiarGlue(unittest.TestCase):
         bot._liar_handle(3, "大話")
         self.assertIsNone(bot._liar_handle(3, "天氣"))
         self.assertIsNone(bot._liar_handle(9, "大話結束"))  # 冇局
+
+
+class TestJaiPai(unittest.TestCase):
+    """齋叫＋劈／反劈＋結算新規則。"""
+
+    def setUp(self):
+        bot._LIAR_GAMES.clear()
+
+    def tearDown(self):
+        bot._LIAR_GAMES.clear()
+
+    def test_jai_persists_and_message(self):
+        st = liar.new_game(starter="you")
+        st["bot"] = [4, 4, 1, 2, 6]
+        r = liar.user_bid(st, 2, 4, jai=True)
+        self.assertIn("齋叫生效", r)
+        self.assertTrue(st["jai"])
+        # 之後 bot 叫都係齋
+        if st["bid"]:
+            self.assertTrue(st["bid"][2])
+
+    def test_pai_double_stake_and_counter(self):
+        st = liar.new_game(starter="you")
+        st["bot"] = [5, 5, 1, 3, 3]     # 對 3個5 有底氣（3≥3）→ 反劈
+        st["bid"], st["bidder"], st["turn"] = (3, 5, False), "bot", "you"
+        r = liar.user_challenge(st, stake=2)
+        self.assertIn("劈", r)
+        self.assertIn("反劈", r)
+        self.assertEqual(st["stake"], 4)    # 反劈 → 4
+        rep, _ = liar.user_dice_declare(st, "我 2 2 2 2 2")
+        self.assertIn("注 4 分", rep)
+        self.assertEqual(st["bot_wins"], 4)  # bot 贏 4 分
+
+    def test_pai_no_counter_when_weak(self):
+        st = liar.new_game(starter="you")
+        st["bot"] = [2, 2, 5, 5, 3]     # 對 4 完全冇貢獻，冇底氣
+        st["bid"], st["bidder"], st["turn"] = (2, 4, False), "bot", "you"
+        r = liar.user_challenge(st, stake=2)
+        self.assertEqual(st["stake"], 2)    # 唔敢反劈
+        rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
+        self.assertIn("注 2 分", rep)
+        self.assertEqual(st["you_wins"], 2)
 
 
 if __name__ == "__main__":
