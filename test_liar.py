@@ -182,6 +182,72 @@ class TestLiarGame(unittest.TestCase):
             self.assertIsNone(rep)
 
 
+class TestOppModel(unittest.TestCase):
+    """對手建模：出價質素 EMA → 預設緊逼（鏡像），證實亂叫先放寬。"""
+
+    def test_new_game_has_opp_fields(self):
+        st = liar.new_game(starter="you")
+        for k in ("u_p_ema", "u_bids", "u_false", "u_calls", "u_folds"):
+            self.assertIn(k, st)
+
+    def test_user_bid_updates_p_ema(self):
+        st = liar.new_game(starter="you")
+        st["bot"] = [2, 2, 2, 5, 6]
+        before = st["u_p_ema"]
+        liar.user_bid(st, 1, 2)          # 高質叫（我手三條2，P 好高）
+        self.assertGreater(st["u_p_ema"], before)
+        st2 = liar.new_game(starter="you")
+        st2["bot"] = [2, 2, 2, 5, 6]
+        liar.user_bid(st2, 9, 3)         # 爛叫（P 低）
+        self.assertLess(st2["u_p_ema"], 0.45)
+
+    def test_tight_never_bids_below_floor(self):
+        rng = random.Random(11)
+        checked = 0
+        for _ in range(150):
+            my_n = rng.randint(2, 5)
+            dice = [rng.randint(1, 6) for _ in range(my_n)]
+            opp_n = rng.randint(1, 5)
+            total = my_n + opp_n
+            cand = liar.legal_raises(None, total)
+            best_p = max(liar.p_bid_true(liar.my_count_for(dice, b[1]),
+                                         total - my_n, b[0], b[1])
+                         for b in cand)
+            if best_p < 0.43:
+                continue                  # 淨低質位可揀（被迫）→唔適用
+            act, bid = liar.decide(dice, total, None,
+                                   {"bids": 5, "p_ema": 0.6,
+                                    "bluff": 0.1, "calls": 0, "folds": 9})
+            if act == "bid":
+                p = liar.p_bid_true(liar.my_count_for(dice, bid[1]),
+                                    total - my_n, bid[0], bid[1])
+                self.assertGreaterEqual(p, 0.40, f"dice={dice} bid={bid}")
+                checked += 1
+        self.assertGreater(checked, 30)
+
+    def test_gate_uses_opp_quality(self):
+        """對手出價質素 EMA 直接驅動挑戰閘：爛叫佬放、正經人鏡像 0.42。"""
+        dice, total = [2, 3, 5, 1, 6], 10
+        seen = {}
+        orig = liar.action_slots
+
+        def spy(d, n, c, lo=0.12, hi=0.75):
+            seen["hi"] = hi
+            return orig(d, n, c, lo, hi)
+        liar.action_slots = spy
+        try:
+            liar.decide(dice, total, None,
+                        {"bids": 5, "p_ema": 0.3, "bluff": 0.8,
+                         "calls": 0, "folds": 9})
+            self.assertGreaterEqual(seen["hi"], 0.60)   # 爛叫佬→閘放寬
+            liar.decide(dice, total, None,
+                        {"bids": 5, "p_ema": 0.6, "bluff": 0.1,
+                         "calls": 0, "folds": 9})
+            self.assertEqual(seen["hi"], 0.42)          # 正經→鏡像
+        finally:
+            liar.action_slots = orig
+
+
 class TestLiarGlue(unittest.TestCase):
     """bot.py 接線：開枱／叫牌／開／報骰／收工。"""
 

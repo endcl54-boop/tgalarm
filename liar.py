@@ -17,7 +17,9 @@ import secrets
 WILD = 1
 MAX_Q = 15          # 叫數上限（10 粒都未到，保險絲）
 CH_VETO_LO = 0.12   # P 低過此 → 強制開（數學否決 NN）
-CH_VETO_HI = 0.75   # P 高過此 → 禁止開（0.75 以上開人註定蝕；NN 微調後偏愛開）
+CH_VETO_HI = 0.75   # action_slots 預設上限
+CH_GATE_BASE = 0.45 # 對手建模版挑戰閘：P<0.45 先准開（開人 EV=P(叫假)，>0.45 蝕佳）
+CH_GATE_MAX = 0.70  # 對手好吹水時最多放到 0.70
 
 # ---------------- 數學層 ----------------
 
@@ -85,7 +87,8 @@ def legal_raises(cur, n_total: int):
 # ---------------- 動作槽（NN 輸出空間，訓練／推理共用） ----------------
 # slot 0=開 1=最穩 2=最平 3=中庸 4=大話 5=強叫（跟自己手）
 
-def action_slots(dice, n_total: int, cur):
+def action_slots(dice, n_total: int, cur, gate_lo: float = CH_VETO_LO,
+                 gate_hi: float = CH_VETO_HI):
     """回傳 (slots, mask)。slots[i]=('challenge',None) 或 ('bid',(q,f))；
     mask[i]=1 可用。"""
     my_n = len(dice)
@@ -99,9 +102,9 @@ def action_slots(dice, n_total: int, cur):
     if cur:
         p_cur = p_of(cur)
         mask[0] = 1
-        if p_cur < CH_VETO_LO:
+        if p_cur < gate_lo:
             return slots, [1, 0, 0, 0, 0, 0]  # 數學否決：必開
-        if p_cur > CH_VETO_HI:
+        if p_cur > gate_hi:
             mask[0] = 0                      # 咁真都開＝送死
     cand = legal_raises(cur, n_total)
     if not cand:
@@ -183,11 +186,58 @@ def nn_policy(x):
     return [e / s for e in es]
 
 
-def decide(dice, n_total: int, cur):
-    """回傳 ('challenge', None) 或 ('bid', (q, face))。"""
+def decide(dice, n_total: int, cur, opp=None):
+    """回傳 ('challenge', None) 或 ('bid', (q, face))。
+
+    opp（可選）：{"bluff": 對手吹水率EMA, "calls": 對手開過次數,
+    "folds": 對手跟叫次數}——吹水佬→挑戰閘放寬（最多0.70）；
+    好開人（call_rate>0.5）→禁 P<0.30 嘅吹水叫，防俾人捉。"""
     my_n = len(dice)
     n_unk = n_total - my_n
-    slots, mask = action_slots(dice, n_total, cur)
+    bluff = float((opp or {}).get("bluff", 0.0))
+    u_bids = int((opp or {}).get("bids", 0))
+    calls = float((opp or {}).get("calls", 0.0))
+    folds = float((opp or {}).get("folds", 0.0))
+    # 挑戰閘：有數據先按你吹水率放寬（誠實→0.30 龜；吹水→最多0.70 咬你）
+    if u_bids >= 2:
+        gate_hi = min(0.30 + 0.45 * bluff, CH_GATE_MAX)
+    else:
+        gate_hi = 0.35                        # 未摸清你之前企穩
+    # 緊逼模式＝預設（鏡像 0.42＋淨最穩）。對手「出價質素」EMA 低
+    # （專叫 P<0.45 嘅爛叫）先當佢可剝削，開返攻擊閘
+    u_p_ema = float((opp or {}).get("p_ema", 0.5))
+    tight = not (u_bids >= 3 and u_p_ema < 0.45)
+    if tight:
+        gate_hi = 0.42
+    def _p(b):
+        return p_bid_true(my_count_for(dice, b[1]), n_unk, b[0], b[1])
+
+    slots, mask = action_slots(dice, n_total, cur, CH_VETO_LO, gate_hi)
+    if tight:                                 # 唔玩花式：淨最穩
+        for i in (2, 3, 4, 5):
+            mask[i] = 0
+        if not any(mask[i] for i in range(1, 6)):
+            cand = legal_raises(cur, n_total)
+            if cand:
+                best = max(cand, key=lambda b: _p(b))
+                slots[1] = ("bid", best)
+                mask = [mask[0], 1, 0, 0, 0, 0]
+
+    # 自己吹水嘅底線：P<0.42 嘅叫對任何半像樣對手都係負 EV——
+    # 預設禁；對手證明被動（好少開牌）先放寬到 0.30 博一博
+    floor = 0.42
+    if not tight:
+        floor = 0.30
+    if floor > 0.30:
+        for i in range(1, 6):
+            if mask[i] and slots[i][1] is not None and _p(slots[i][1]) < floor:
+                mask[i] = 0
+        if not any(mask[i] for i in range(1, 6)):   # 全被封→留最穩
+            cand = legal_raises(cur, n_total)
+            if cand:
+                best = max(cand, key=lambda b: _p(b))
+                slots[1] = ("bid", best)
+                mask = [mask[0], 1, 0, 0, 0, 0]
     if sum(mask) == 0:                       # 理論唔會；保險
         if cur:
             return "challenge", None
@@ -225,13 +275,17 @@ def new_game(n_start: int = 5, starter: str = "you"):
     st = {"bot": roll(n_start), "you_n": n_start, "bot_n": n_start,
           "bid": None, "bidder": None, "turn": starter,
           "over": False, "await_dice": False, "you_wins": 0, "bot_wins": 0,
-          "round": 1}
+          "round": 1, "u_bids": 0, "u_false": 0.0, "u_calls": 0, "u_folds": 0,
+          "u_p_ema": 0.5}
     return st
 
 
 def bot_speak_bid(st) -> str:
     total = st["you_n"] + st["bot_n"]
-    act, bid = decide(st["bot"], total, st["bid"])
+    opp = {"bluff": st.get("u_false", 0.0), "calls": st.get("u_calls", 0),
+           "folds": st.get("u_folds", 0), "bids": st.get("u_bids", 0),
+           "p_ema": st.get("u_p_ema", 0.5)}
+    act, bid = decide(st["bot"], total, st["bid"], opp)
     if act == "challenge":
         st["await_dice"] = True
         return ("🕵️ 我開你！打你手骰過嚟（例：我 2 3 5 5 6）"
@@ -251,6 +305,10 @@ def user_bid(st, q: int, f: int):
         return (f"要叫大過「{bid_text(*st['bid'])}」先得"
                 f"（1 百搭；同數量入面 1 最大）。")
     st["bid"], st["bidder"], st["turn"] = (q, f), "you", "bot"
+    st["u_folds"] = st.get("u_folds", 0) + 1
+    _p = p_bid_true(my_count_for(st["bot"], f),
+                    st["you_n"] + st["bot_n"] - len(st["bot"]), q, f)
+    st["u_p_ema"] = 0.7 * st.get("u_p_ema", 0.5) + 0.3 * _p
     return bot_speak_bid(st)
 
 
@@ -262,6 +320,7 @@ def user_challenge(st):
         return "都未有人叫，開乜？你先叫啦（例：3個4）。"
     if st["turn"] != "you":
         return "要到我先可以開。而家我等緊你叫牌。"
+    st["u_calls"] = st.get("u_calls", 0) + 1
     st["await_dice"] = True
     return "🕵️ 開！打你手骰過嚟（例：我 2 3 5 5 6）——靠你自覺報真數 😏"
 
@@ -281,6 +340,9 @@ def user_dice_declare(st, text: str):
               if d == f or (f != WILD and d == WILD))
     ok = cnt >= q                          # 夠數＝叫牌贏
     bidder = st["bidder"]
+    if bidder == "you":                    # 記錄你嘅吹水率（EMA）
+        st["u_bids"] = st.get("u_bids", 0) + 1
+        st["u_false"] = 0.7 * st.get("u_false", 0.0) + 0.3 * (0.0 if ok else 1.0)
     if ok:                                 # 開人嗰個輸
         loser = "bot" if bidder == "you" else "you"
     else:

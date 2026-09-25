@@ -15,7 +15,7 @@
 | AI：`ai <問題>`（SerpAPI Google AI Mode） | ✅ |
 | 待辦、深夜相搬運（wa_night_mover）、搬相 | ✅ |
 | 小工具：匯率（open.er-api）／世界時間／揀嘢／骰仔／密碼／打氣 | ✅ |
-| 🎲 大話骰（liar.py：binomial 數學層＋自我對弈 NN 0.3ms；1 百搭） | ✅ |
+| 🎲 大話骰（binomial 數學層＋自我對弈 NN＋對手建模：鏡像 50%／抽吹水佬 92%／狂徒 93%） | ✅ |
 | wake lock 啟動即攞 | ✅（Android 準時關鍵） |
 | 測試 | 262 passed（`python -m pytest test_bot.py -q`） |
 
