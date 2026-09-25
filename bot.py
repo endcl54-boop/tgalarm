@@ -146,6 +146,7 @@ HELP = (
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
     "\n🎲 骰仔（骰仔 20）　🎯 揀 飲茶/壽司/拉麵　🔐 密碼 16　💪 打氣"
+    "🎲 大話骰：「大話」開枱，3個4 叫牌，「開！」攤牌（1 百搭；NN 引擎）"
     "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
 )
 
@@ -1148,6 +1149,57 @@ def _weather_report() -> tuple:
         return True, "\n".join(lines)
     except (KeyError, IndexError, TypeError, ValueError) as e:
         return False, f"天氣資料格式唔啱：{e}"
+
+
+# ---- 大話骰（liar.py 引擎：數學層+神經網絡，純本地 <1ms）----
+try:
+    import liar as _liar
+except Exception:  # noqa: BLE001
+    _liar = None
+_LIAR_GAMES: dict = {}
+_LIAR_DICE_RE = re.compile(r"^\s*我?\s*((?:[1-6]\s+){4}[1-6])\s*$")
+
+
+def _liar_handle(chat_id: int, t: str):
+    """大話骰指令分發。回傳回覆文字；None=唔關佢事（跌返其他指令）。"""
+    if _liar is None:
+        return None
+    st = _LIAR_GAMES.get(chat_id)
+    if t in ("大話", "大話骰", "玩大話", "開枱"):
+        if st and not st["over"]:
+            return "開咗枱喇——繼續！開=攤牌，大話結束=收工。"
+        starter = random.choice(("you", "bot"))
+        _LIAR_GAMES[chat_id] = _liar.new_game(starter=starter)
+        g = _LIAR_GAMES[chat_id]
+        head = ("🎲 開枱！我搖好咗 5 粒（你知我唔知）。你搖啦——")
+        if starter == "bot":
+            return head + "\n" + _liar.bot_speak_bid(g)
+        return head + "你先叫（例：3個4；1 百搭）。"
+    if st is None:
+        return None
+    if t in ("大話結束", "收工", "唔玩"):
+        _LIAR_GAMES.pop(chat_id, None)
+        return (f"收工。戰績：你 {st['you_wins']}"
+                f"：{st['bot_wins']} 我 🤝")
+    if st["over"]:
+        _LIAR_GAMES.pop(chat_id, None)
+        return None
+    if st["await_dice"]:
+        if _LIAR_DICE_RE.match(t):
+            rep, _done = _liar.user_dice_declare(st, t)
+            return rep
+        return ("等緊你報骰（例：我 2 3 5 5 6）。"
+                "唔想玩就「大話結束」。")
+    bid = _liar.parse_bid(t)
+    if bid:
+        return _liar.user_bid(st, *bid)
+    if t in ("開", "開！", "開!", "大話!", "大話！"):
+        return _liar.user_challenge(st)
+    if st["turn"] == "you" and st["bid"] and not re.match(
+            r"^天氣|排程|幫助|help|時間 |匯率|問 |ai |", t):
+        return ("睇唔明——叫牌（例：3個4）、"
+                "開！（攤牌）、或大話結束。")
+    return None
 
 
 # ---- 隨問隨答小工具：匯率／世界時間／隨機／密碼／打氣 ----
@@ -2788,6 +2840,12 @@ async def _on_message(update, context):
     if t.startswith("時間 ") or t == "時間":
         await update.message.reply_text(_time_reply(t[2:].strip()))
         return
+    _lcid = update.effective_chat.id if getattr(update, "effective_chat", None) else None
+    if (_lcid and _LIAR_GAMES.get(_lcid)) or t.startswith("大話"):
+        _r = _liar_handle(_lcid, t)
+        if _r is not None:
+            await update.message.reply_text(_r)
+            return
     if t.startswith("匯率"):
         await update.message.reply_text("💱 查緊匯率…")
         rep = await asyncio.to_thread(_fx_reply, t[2:].strip())

@@ -14,6 +14,8 @@
 | 天氣：`天氣` 隨問隨答＋每日 11:00/18:30 簡報（Open-Meteo 免 key） | ✅ |
 | AI：`ai <問題>`（SerpAPI Google AI Mode） | ✅ |
 | 待辦、深夜相搬運（wa_night_mover）、搬相 | ✅ |
+| 小工具：匯率（open.er-api）／世界時間／揀嘢／骰仔／密碼／打氣 | ✅ |
+| 🎲 大話骰（liar.py：binomial 數學層＋自我對弈 NN 0.3ms；1 百搭） | ✅ |
 | wake lock 啟動即攞 | ✅（Android 準時關鍵） |
 | 測試 | 262 passed（`python -m pytest test_bot.py -q`） |
 
