@@ -297,7 +297,9 @@ class TestLiarGlue(unittest.TestCase):
     def test_not_liar_text_returns_none(self):
         bot._liar_handle(3, "大話")
         self.assertIsNone(bot._liar_handle(3, "天氣"))
-        self.assertIsNone(bot._liar_handle(9, "大話結束"))  # 冇局
+        self.assertIn("未開枱", bot._liar_handle(9, "大話結束"))  # 冇局都提示
+        self.assertIn("未開枱", bot._liar_handle(9, "2個1齋"))    # 叫牌都提示
+        self.assertIsNone(bot._liar_handle(9, "天氣"))            # 唔關事→靜
 
 
 class TestJaiPai(unittest.TestCase):

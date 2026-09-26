@@ -1176,6 +1176,9 @@ def _liar_handle(chat_id: int, t: str):
             return head + "\n" + _liar.bot_speak_bid(g)
         return head + "你先叫（起手 3個起、齋 2個起；叫1即齋）。例：3個4／2個1齋"
     if st is None:
+        if _liar.parse_bid(t) or t in ("開", "開！", "開!", "劈", "劈！",
+                                       "大話結束", "收工", "唔玩"):
+            return "未開枱——打「大話」開枱先（之後叫 3個4／2個1齋 咁款）。"
         return None
     if t in ("大話結束", "收工", "唔玩"):
         _LIAR_GAMES.pop(chat_id, None)
