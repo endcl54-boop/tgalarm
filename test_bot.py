@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """bot.py 指令解析 + Intent 生成嘅單元測試（唔使 Telegram、唔使 Android 都行到）"""
 import asyncio
+import time
 import datetime as dt
 import json
 import os
@@ -3136,3 +3137,51 @@ class TestNavDialogTask(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWaitWall(unittest.TestCase):
+    """牆鐘分段等：deep sleep（monotonic 凍結）都唔會拖遲排程。"""
+
+    def test_basic_past_and_future(self):
+        past = bot.dt.datetime.now() - bot.dt.timedelta(seconds=1)
+        self.assertIsNone(asyncio.run(bot._wait_wall(past)))          # 已過點→即刻過
+        t0 = time.monotonic()
+        target = bot.dt.datetime.now() + bot.dt.timedelta(seconds=0.6)
+        asyncio.run(bot._wait_wall(target, chunk=0.2))
+        dt_used = time.monotonic() - t0
+        self.assertGreaterEqual(dt_used, 0.5)
+        self.assertLess(dt_used, 3.0)
+
+    def test_wall_jump_catches_up(self):
+        """模擬 suspend：牆鐘中途跳前 15 分鐘，_wait_wall 應即刻醒。"""
+        real_dt = bot.dt.datetime
+
+        class FrozenMeta(type):
+            pass
+
+        class ShimDt(real_dt, metaclass=FrozenMeta):
+            jumped = {"n": 0}
+
+            @classmethod
+            def now(cls):
+                # 第一次 now() 之後就「凍結期完，牆鐘跳 15 分鐘」
+                if cls.jumped["n"] == 0:
+                    cls.jumped["n"] = 1
+                    return real_dt.now()
+                if cls.jumped["n"] == 1:
+                    cls.jumped["n"] = 2
+                    return real_dt.now() + bot.dt.timedelta(minutes=15)
+                return real_dt.now()
+
+        orig_dt = bot.dt
+        try:
+            import types
+            shim = types.SimpleNamespace(datetime=ShimDt, timedelta=bot.dt.timedelta)
+            bot.dt = shim
+            t0 = time.monotonic()
+            target = real_dt.now() + bot.dt.timedelta(seconds=120)
+            asyncio.run(bot._wait_wall(target, chunk=0.2))
+            used = time.monotonic() - t0
+            self.assertLess(used, 5.0, f"牆鐘跳前應即刻追上，實際用咗 {used:.1f}s")
+        finally:
+            bot.dt = orig_dt

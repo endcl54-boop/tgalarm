@@ -1791,9 +1791,27 @@ def _is_bal_denied(info) -> bool:
     return "securityexception" in txt or "background" in txt or "not allowed" in txt
 
 
+async def _wait_wall(target: dt.datetime, chunk: float = 30.0) -> None:
+    """瞓到 target（牆鐘制）。
+
+    電話深度睡眠會凍結 CLOCK_MONOTONIC——asyncio.sleep 一覗瞓過夜，
+    24 小時 sleep 實際要 24小時+凍結總時長 先響（2026-09-27 實證：
+    導航 0732 遲咗 14分51秒＝夜裡 suspend 總時長）。改每 chunk 對
+    牆鐘重算剩低：suspend 期間牆鐘照行，醒返即刻追上進度；
+    遲到上限 ≈ 一個 chunk。"""
+    while True:
+        rem = (target - dt.datetime.now()).total_seconds()
+        if rem <= 0:
+            return
+        await asyncio.sleep(min(rem, chunk))
+
+
 async def _fire_later(job: dict, delay: float) -> None:
     try:
-        await asyncio.sleep(delay)
+        if delay > 0:
+            await _wait_wall(dt.datetime.now() + dt.timedelta(seconds=delay))
+        else:
+            await asyncio.sleep(0)        # 保持讓路語義同舊 delay=0 一致
     except asyncio.CancelledError:
         return
     now = dt.datetime.now()
