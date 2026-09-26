@@ -59,13 +59,15 @@ class TestLiarBids(unittest.TestCase):
         # 齋版插喺非齋同面同非齋下一面中間
         self.assertLess(liar.bid_rank(3, 4, False), liar.bid_rank(3, 4, True))
         self.assertLess(liar.bid_rank(3, 4, True), liar.bid_rank(3, 5, False))
+        self.assertLess(liar.bid_rank(3, 6, True), liar.bid_rank(3, 1, True))
 
     def test_parse_bid(self):
         self.assertEqual(liar.parse_bid("3個4"), (3, 4, False))
         self.assertEqual(liar.parse_bid(" 12個6！"), (12, 6, False))
         self.assertEqual(liar.parse_bid("3個4齋"), (3, 4, True))
         self.assertEqual(liar.parse_bid("3個4 齋"), (3, 4, True))
-        self.assertEqual(liar.parse_bid("3個1齋"), (3, 1, False))  # 1冇齋
+        self.assertEqual(liar.parse_bid("3個1齋"), (3, 1, True))  # 叫1即齋
+        self.assertEqual(liar.parse_bid("3個1"), (3, 1, True))  # 自動 normalize
         self.assertIsNone(liar.parse_bid("30個4"))
         self.assertIsNone(liar.parse_bid("3個7"))
         self.assertIsNone(liar.parse_bid("34"))
@@ -356,17 +358,28 @@ class TestOpeningRules(unittest.TestCase):
         if st["bid"]:
             self.assertTrue(st["bid"][2])             # bot 跟住都係齋
 
-    def test_ones_never_biddable(self):
-        st = liar.new_game(starter="you")
-        r = liar.user_bid(st, 3, 1)
-        self.assertIn("百搭", r)
-        self.assertIsNone(st["bid"])
+    def test_ones_always_jai(self):
+        """用戶更正：1齋接受——「X個1」一律當齋；起手 1個1 屬齋（照齋 2 個起）。"""
+        self.assertEqual(liar.parse_bid("3個1"), (3, 1, True))
+        self.assertEqual(liar.parse_bid("3個1齋"), (3, 1, True))
         for cur in (None, (3, 4, False)):
             for jm in (False, True):
                 c = liar.legal_raises(cur, 10, jai_mode=jm)
                 self.assertTrue(c)
-                self.assertTrue(all(b[1] != 1 for b in c),
-                                f"cur={cur} jai_mode={jm}")
+                self.assertTrue(all(b[2] for b in c if b[1] == 1),
+                                f"面1非齋: cur={cur} jm={jm}")
+        st = liar.new_game(starter="you")
+        r = liar.user_bid(st, 1, 1)
+        self.assertIn("起手", r)                      # 1個1 屬齋 → 唔夠 2 個起
+        self.assertIsNone(st["bid"])
+        st2 = liar.new_game(starter="you")
+        st2["bot"] = [1, 1, 4, 4, 6]                  # 釘骰：bot 有底氣會叫唔會開
+        r2 = liar.user_bid(st2, 2, 1, jai=True)
+        self.assertIn("我叫", r2)                      # 2個1齋 起手＝合法
+        self.assertTrue(st2["jai"])                   # 叫1即齋 mode 開咗
+        self.assertTrue(st2["bid"][2])                # bot 跟住都係齋
+        self.assertGreater(liar.bid_rank(*st2["bid"]),
+                           liar.bid_rank(2, 1, True))
 
     def test_bot_opening_respects_floors(self):
         rng = random.Random(7)
@@ -375,7 +388,8 @@ class TestOpeningRules(unittest.TestCase):
             act, bid = liar.decide(dice, 10, None)
             self.assertEqual(act, "bid")
             q, f, jai = bid
-            self.assertNotEqual(f, 1)
+            if f == 1:
+                self.assertTrue(jai)                  # 面1一定齋
             self.assertGreaterEqual(q, liar.OPEN_MIN_JAI if jai
                                     else liar.OPEN_MIN_Q)
 
@@ -387,6 +401,21 @@ class TestOpeningRules(unittest.TestCase):
         self.assertIsNone(bot._LIAR_GAMES[11]["bid"])
         r = bot._liar_handle(11, "3個5")
         self.assertTrue(r)
+        bot._LIAR_GAMES.clear()
+
+    def test_glue_accepts_ones_jai(self):
+        bot._LIAR_GAMES.clear()
+        bot._LIAR_GAMES[12] = liar.new_game(starter="you")
+        bot._LIAR_GAMES[12]["bot"] = [1, 1, 4, 4, 6]
+        r = bot._liar_handle(12, "1個1")
+        self.assertIn("起手", r)                      # 1個1 唔夠齋底
+        r = bot._liar_handle(12, "2個1齋")
+        self.assertTrue(r)                            # 2個1齋 起手＝合法
+        g = bot._LIAR_GAMES[12]
+        self.assertTrue(g["jai"])                     # 叫1即齋 mode 開咗
+        self.assertTrue(g["bid"][2])                  # bot 跟住都係齋
+        self.assertGreater(liar.bid_rank(*g["bid"]),
+                           liar.bid_rank(2, 1, True))
         bot._LIAR_GAMES.clear()
 
 
