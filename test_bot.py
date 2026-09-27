@@ -353,6 +353,62 @@ class TestTimerCap(unittest.TestCase):
         self.assertNotIn("超過計時上限", r)
         self.assertIn("#1", r)                     # 入咗排程（統一 bot 守）
 
+    def test_timer_goes_to_clock_app(self):
+        seen = {}
+        def fake(cmd):
+            seen["cmd"] = " ".join(cmd)
+            return True, "OK"
+        old = bot.run_intent
+        bot.run_intent = fake
+        try:
+            r = _execute(parse_command("計時 25分鐘 杯麵", NOW), NOW, chat_id=1)
+        finally:
+            bot.run_intent = old
+        self.assertIn("已落手機時鐘", r)
+        self.assertIn("SET_TIMER", seen["cmd"])
+        self.assertIn("1500", seen["cmd"])
+        self.assertIn("杯麵", seen["cmd"])
+        self.assertNotIn("「取消", r)              # 冇開 bot job
+
+    def test_alarm_goes_to_clock_app(self):
+        seen = {}
+        def fake(cmd):
+            seen["cmd"] = " ".join(cmd)
+            return True, "OK"
+        old = bot.run_intent
+        bot.run_intent = fake
+        try:
+            r = _execute(parse_command("鬧鐘 0700 起身", NOW), NOW, chat_id=1)
+        finally:
+            bot.run_intent = old
+        self.assertIn("已落手機時鐘", r)
+        self.assertIn("07:00", r)
+        self.assertIn("SET_ALARM", seen["cmd"])
+        self.assertNotIn("「取消", r)              # 冇開 bot job
+
+    def test_intent_fail_falls_back_to_bell(self):
+        old = bot.run_intent
+        bot.run_intent = lambda cmd: (False, "boom")
+        try:
+            r = _execute(parse_command("鬧鐘 0700", NOW), NOW, chat_id=1)
+        finally:
+            bot.run_intent = old
+        self.assertIn("#1", r)
+        self.assertIn("設唔到", r)
+
+    def test_over_phone_cap_uses_bell_chain(self):
+        old = bot.run_intent
+        def boom(cmd):
+            raise AssertionError("超cap唔應該掂 intent")
+        bot.run_intent = boom
+        try:
+            p = parse_command("計時 99999小時", NOW)
+            r = _execute(p, NOW, chat_id=1)
+        finally:
+            bot.run_intent = old
+        self.assertIn("99小時59分", r)
+        self.assertIn("#1", r)
+
 
 class TestPlayerGrammar(unittest.TestCase):
     """YouTube 歌單指令文法"""
