@@ -62,6 +62,8 @@ TAKEAWAY_PATH = os.path.expanduser(
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
 DESTINATIONS_PATH = os.path.expanduser(os.environ.get("TGALARM_DESTINATIONS", "~/.tgalarm/destinations.json"))
 WEBS_PATH = os.path.expanduser(os.environ.get("TGALARM_WEBS", "~/.tgalarm/webs.json"))
+COUNTDOWNS_PATH = os.path.expanduser(
+    os.environ.get("TGALARM_COUNTDOWNS", "~/.tgalarm/countdowns.json"))
 TODO_PATH = os.path.expanduser(os.environ.get("TGALARM_TODO", "~/.tgalarm/todo.json"))
 _YT_PKG = "com.google.android.youtube"
 
@@ -124,6 +126,9 @@ HELP = (
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
     "・外賣模式：打「外賣」開——所有計時提早 5 分鐘響；「外賣結束」收工\n"
+    "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
+    "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
+    "📅 倒數 考試 2027-05-04／倒數 聖誕 12-25（每年）／倒數（清單）　🎲 分組 3 阿明,阿強,阿寶\n"
     "⏰ 鬧鐘（直接落手機時鐘 app，系統自己響）：\n"
     "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身\n"
     "・連環鬧：鬧鐘 0900-1700 每60分鐘 轉位；過午夜都得（2100-0000 報更）；可拆兩行寫；頭加「每日」＝日日\n"
@@ -752,6 +757,237 @@ def _takeaway_handle(t: str):
         _takeaway_set(False)
         return "✅ 外賣模式收工——計時還原，唔再提早響。"
     return None
+
+
+# ---- 電量（termux-battery-status 優先，sysfs 後備）----
+
+def _battery_status() -> tuple:
+    """回傳 (剩電%, 充電中?, 溫度℃ or None) 或 (None, None, 錯誤訊息)。"""
+    try:
+        r = subprocess.run(["termux-battery-status"], capture_output=True,
+                           text=True, timeout=6)
+        if r.returncode == 0:
+            d = json.loads(r.stdout.strip() or "{}")
+            pct = int(d.get("percentage", -1))
+            chg = (str(d.get("status", "")).lower() in ("charging", "full")
+                   or bool(d.get("plugged")))
+            temp = d.get("temperature")
+            temp = round(float(temp) / 10.0, 1) if temp else None
+            if pct >= 0:
+                return pct, chg, temp
+    except Exception:
+        pass
+    try:
+        base = "/sys/class/power_supply/battery"
+        pct = int(open(f"{base}/capacity", encoding="utf-8").read().strip())
+        try:
+            st = open(f"{base}/status", encoding="utf-8").read().strip().lower()
+            chg = st in ("charging", "full")
+        except Exception:
+            chg = False
+        try:
+            temp = round(int(open(f"{base}/temp",
+                                  encoding="utf-8").read().strip()) / 10.0, 1)
+        except Exception:
+            temp = None
+        return pct, chg, temp
+    except Exception as e:  # noqa: BLE001
+        return None, None, str(e)
+
+
+def _batt_line(pct, chg, temp) -> str:
+    if pct is None:
+        return f"❌ 電量攞唔到：{str(temp)[:80]}"
+    bits = [f"🔋 {pct}%"]
+    if chg:
+        bits.append("⚡充電中")
+    if temp is not None:
+        bits.append(f"{temp}℃")
+    return "・".join(bits)
+
+
+def _add_simple_job(chat_id: int, job: dict) -> dict:
+    jobs = _jobs()
+    jid = max((j["id"] for j in jobs), default=0) + 1
+    job["id"] = jid
+    job.setdefault("daily", False)
+    job.setdefault("seconds", 0)
+    job.setdefault("url", "")
+    job.setdefault("shuffle", False)
+    job.setdefault("paused", False)
+    jobs.append(job)
+    _save_json(JOBS_PATH, jobs)
+    _arm(job)
+    return job
+
+
+# ---- 倒數日 ----
+
+def _countdowns() -> dict:
+    return _load_json(COUNTDOWNS_PATH, {})
+
+
+def _cd_abs(entry_date: str) -> dt.date:
+    y, m, d = (int(x) for x in entry_date.split("-"))
+    return dt.date(y, m, d)
+
+
+def _countdown_days(entry: dict, today: dt.date) -> int:
+    if entry["kind"] == "abs":
+        return (_cd_abs(entry["date"]) - today).days
+    mm, dd = (int(x) for x in entry["date"].split("-"))
+    try:
+        d = dt.date(today.year, mm, dd)
+    except ValueError:
+        d = dt.date(today.year + 1, mm, dd)
+    if d < today:
+        d = dt.date(today.year + 1, mm, dd)
+    return (d - today).days
+
+
+def _countdown_handle(t: str, chat_id: int):
+    """倒數日：倒數 名 YYYY-MM-DD／倒數 名 MM-DD（每年）／倒數（清單）／刪倒數 名。"""
+    if t in ("倒數", "倒數日"):
+        cd = _countdowns()
+        if not cd:
+            return ("📅 仲未有倒數。例：倒數 考試 2027-05-04・倒數 聖誕 12-25（每年）")
+        today = dt.date.today()
+        lines = ["📅 倒數日："]
+        for name, e in cd.items():
+            days = _countdown_days(e, today)
+            when = e["date"] if e["kind"] == "abs" else f"{e['date']}（每年）"
+            lines.append(f"・{name}：{'啱啱今日！' if days == 0 else f'仲有 {days} 日'}（{when}）")
+        return "\n".join(lines)
+    m = re.fullmatch(r"(?:刪倒數|刪除倒數)\s+(.+)", t)
+    if m:
+        cd = _countdowns()
+        if m.group(1).strip() in cd:
+            del cd[m.group(1).strip()]
+            _save_json(COUNTDOWNS_PATH, cd)
+            return f"🗑 已刪倒數「{m.group(1).strip()}」"
+        return f"搵唔到倒數「{m.group(1).strip()}」"
+    m = re.fullmatch(r"倒數\s+(\S{1,20})\s+(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})", t)
+    if not m:
+        return None
+    name, ds = m.group(1), m.group(2)
+    if re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}", ds):
+        try:
+            _cd_abs(ds)
+        except ValueError:
+            return "❓ 日期唔存在，格式：YYYY-MM-DD 或 MM-DD（每年）"
+        entry = {"kind": "abs", "date": ds}
+    else:
+        try:
+            mm, dd = (int(x) for x in ds.split("-"))
+            dt.date(2024, mm, dd)
+        except ValueError:
+            return "❓ 日期唔存在，格式：YYYY-MM-DD 或 MM-DD（每年）"
+        entry = {"kind": "ann", "date": f"{mm:02d}-{dd:02d}"}
+    cd = _countdowns()
+    cd[name] = entry
+    _save_json(COUNTDOWNS_PATH, cd)
+    days = _countdown_days(entry, dt.date.today())
+    tag = "（每年）" if entry["kind"] == "ann" else ""
+    return f"📅 {name}：{'啱啱今日！' if days == 0 else f'仲有 {days} 日'}（{entry['date']}{tag}）"
+
+
+# ---- 隨機分組 ----
+
+def _groups_handle(t: str):
+    m = re.fullmatch(r"分組\s*(\d{1,2})\s+(.+)", t)
+    if not m:
+        return None
+    k = int(m.group(1))
+    names = [x.strip() for x in re.split(r"[,，、]", m.group(2)) if x.strip()]
+    if k < 1 or k > 20 or len(names) < k:
+        return f"❓ 用法：分組 3 阿明,阿強,阿寶,小明,阿偉（{len(names)}個人分唔到 {k} 組）"
+    random.shuffle(names)
+    groups = [[] for _ in range(k)]
+    for i, n in enumerate(names):
+        groups[i % k].append(n)
+    lines = ["🎲 分組結果："]
+    for i, g in enumerate(groups, 1):
+        lines.append(f"{i}組：{'、'.join(g)}")
+    return "\n".join(lines)
+
+
+# ---- 習慣提醒（每 N 分鐘 TG 提一次，取消 N 收）----
+
+def _nag_handle(t: str, chat_id: int):
+    if t == "提醒":
+        nags = [j for j in _jobs() if j.get("type") == "nag"]
+        if not nags:
+            return "💧 仲未有習慣提醒。例：提醒 每60分 飲水（取消 N 收）"
+        lines = ["💧 習慣提醒："]
+        for j in nags:
+            lines.append(f"・#{j['id']} 每{j.get('every', 3600) // 60}分 "
+                         f"{j.get('label', '')}")
+        return "\n".join(lines)
+    m = re.fullmatch(r"提醒\s*每\s*(\d{1,4})\s*分(鐘)?\s+(.+)", t)
+    if not m:
+        return None
+    every = int(m.group(1)) * 60
+    label = m.group(3).strip()
+    now = dt.datetime.now()
+    job = _add_simple_job(chat_id, {
+        "type": "nag", "every": every, "label": label, "chat_id": chat_id,
+        "hh": now.hour, "mm": now.minute, "next": (now + dt.timedelta(seconds=every)).isoformat()})
+    return (f"💧 已設提醒（#{job['id']}）：每 {every // 60} 分鐘提你「{label}」"
+            "——「取消 %d」收" % job["id"])
+
+
+# ---- 專注模式（番茄鐘：工作/休息循環，用系統計時器響）----
+
+def _focus_handle(t: str, chat_id: int):
+    if t in ("專注結束", "唔專注", "收工專注"):
+        fs = [j for j in _jobs() if j.get("type") == "focus"]
+        if not fs:
+            return "而家冇專注模式行緊。"
+        for j in fs:
+            _remove_job(j["id"])
+        return "🛑 專注模式收工——下個循環唔會再響（時鐘 app 入面現有計時器自己剷）"
+    m = re.fullmatch(r"專注\s*(\d{1,3})?\s*(.*)", t)
+    if not m:
+        return None
+    wmin = int(m.group(1)) if m.group(1) else 25
+    if not 5 <= wmin <= 240:
+        return "❓ 專注時長要 5–240 分鐘。例：專注 25"
+    label = m.group(2).strip()[:40]
+    bmin = max(5, wmin // 5)
+    now = dt.datetime.now()
+    job = _add_simple_job(chat_id, {
+        "type": "focus", "wmin": wmin, "bmin": bmin, "phase": "work",
+        "label": label, "chat_id": chat_id,
+        "hh": now.hour, "mm": now.minute, "next": now.isoformat()})
+    tag = f"（{label}）" if label else ""
+    return (f"🎯 專注模式開始{tag}：{wmin} 分鐘工作／{bmin} 分鐘休息循環"
+            f"——即刻落第一個計時器。「專注結束」收工")
+
+
+# ---- 電量守（每個鐘查一次，低過門檻警一次）----
+
+def _battery_handle(t: str, chat_id: int):
+    if t == "電量":
+        return _batt_line(*_battery_status())
+    if t in ("電量守完", "電量守結束"):
+        gs = [j for j in _jobs() if j.get("type") == "battery"]
+        if not gs:
+            return "而家冇電量守行緊。"
+        for j in gs:
+            _remove_job(j["id"])
+        return "🔋 電量守收工。"
+    m = re.fullmatch(r"電量守\s*(\d{1,3})?", t)
+    if not m:
+        return None
+    thr = int(m.group(1)) if m.group(1) else 20
+    if not 5 <= thr <= 90:
+        return "❓ 門檻要 5–90%。例：電量守 20"
+    now = dt.datetime.now()
+    job = _add_simple_job(chat_id, {
+        "type": "battery", "thr": thr, "alerted": False, "chat_id": chat_id,
+        "hh": now.hour, "mm": now.minute, "next": now.isoformat()})
+    return (f"🔋 電量守開工（#{job['id']}）：每個鐘查一次，"
+            f"低過 {thr}% 又冇充電就提你。「電量守完」收")
 
 
 
@@ -1834,6 +2070,15 @@ def _fmt_job_content(j: dict) -> str:
         return (f"每{(j.get('every') or 0) // 60}分鐘 "
                 f"{j['hh']:02d}:{j['mm']:02d}–{j.get('end_hh', 0):02d}:{j.get('end_mm', 0):02d} "
                 f"{j.get('label') or '時間到'}")
+    if j.get("type") == "web":
+        return f"開網頁「{j.get('label')}」"
+    if j.get("type") == "nag":
+        return f"每{(j.get('every') or 3600) // 60}分 {j.get('label', '')}"
+    if j.get("type") == "focus":
+        return (f"專注 {j.get('wmin', 25)}/{j.get('bmin', 5)}"
+                + (f"（{j['label']}）" if j.get("label") else ""))
+    if j.get("type") == "battery":
+        return f"電量守 ≤{j.get('thr', 20)}%"
     if j.get("type") == "alloc":
         segs = j.get("segments", [])
         names = "、".join(s["text"] for s in segs)
@@ -1856,7 +2101,8 @@ def _fmt_jobs(now: dt.datetime) -> str:
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
-                "bell": "⏰", "weather": "🌤", "web": "🌐"}.get(j.get("type"), "🎵")
+                "bell": "⏰", "weather": "🌤", "web": "🌐", "nag": "💧",
+                "focus": "🎯", "battery": "🔋"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
         else:
@@ -2028,6 +2274,74 @@ async def _fire_later(job: dict, delay: float) -> None:
                 if not _rish_available() and not _adb_lane_available():
                     how += ("\n⚠️ Shizuku 同 adb lane 都冇行——導航可能彈唔出！"
                             "入 Shizuku app 撳「啟動」，或者 send「復活Shizuku」")
+    elif jtype == "nag":
+        await _send_safe(job["chat_id"],
+                         f"💧 {job.get('label') or '提醒時間到'}", "習慣提醒")
+        nxt = now + dt.timedelta(seconds=int(job.get("every") or 3600))
+        job["next"] = nxt.isoformat()
+        jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+        _save_json(JOBS_PATH, jobs)
+        _TASKS.pop(job["id"], None)
+        _arm(job)
+        return
+    elif jtype == "focus":
+        wmin, bmin = int(job.get("wmin", 25)), int(job.get("bmin", 5))
+        if job.get("phase", "work") == "work":
+            secs = wmin * 60
+            ok, info = await asyncio.to_thread(
+                run_intent, timer_intent_cmd(secs, f"專注 {job.get('label', '')}".strip()))
+            how = f"🎯 開始專注 {wmin} 分鐘" + (f"（{job['label']}）" if job.get("label") else "")
+            job["phase"] = "break"
+        else:
+            secs = bmin * 60
+            ok, info = await asyncio.to_thread(
+                run_intent, timer_intent_cmd(secs, "休息完再開工"))
+            how = f"☕ 休息 {bmin} 分鐘"
+            job["phase"] = "work"
+        msg = (how + "\n⏱ 已落時鐘 app（深度睡眠都準時）" if ok
+               else f"❌ {how}失敗：{info[:80]}")
+        await _send_safe(job["chat_id"], msg, "專注模式")
+        nxt = now + dt.timedelta(seconds=secs)
+        job["next"] = nxt.isoformat()
+        jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+                j["phase"] = job["phase"]
+        _save_json(JOBS_PATH, jobs)
+        _TASKS.pop(job["id"], None)
+        _arm(job)
+        return
+    elif jtype == "battery":
+        pct, chg, temp = await asyncio.to_thread(_battery_status)
+        thr = int(job.get("thr", 20))
+        msg = None
+        if pct is None:
+            msg = f"❌ 電量守攞唔到讀數：{str(temp)[:80]}"
+        elif pct <= thr and not chg and not job.get("alerted"):
+            job["alerted"] = True
+            msg = f"🔋 電量得 {pct}%（≤{thr}%、冇充電）——記得叉電！"
+        elif pct > thr + 5 or chg:
+            job["alerted"] = False
+        if msg:
+            await _send_safe(job["chat_id"], msg, "電量守")
+        jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["alerted"] = job.get("alerted", False)
+        _save_json(JOBS_PATH, jobs)
+        nxt = now + dt.timedelta(hours=1)
+        job["next"] = nxt.isoformat()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+        _save_json(JOBS_PATH, jobs)
+        _TASKS.pop(job["id"], None)
+        _arm(job)
+        return
     elif jtype == "web":
         if not DRY_RUN:
             _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 著螢幕
@@ -3046,6 +3360,20 @@ async def _on_message(update, context):
     if _tw is not None:
         await update.message.reply_text(_tw)
         return
+    _cid0 = update.effective_chat.id if getattr(update, "effective_chat", None) else 0
+    _cd = _countdown_handle(t, _cid0)
+    if _cd is not None:
+        await update.message.reply_text(_cd)
+        return
+    _gp = _groups_handle(t)
+    if _gp is not None:
+        await update.message.reply_text(_gp)
+        return
+    for _h in (_nag_handle, _focus_handle, _battery_handle):
+        _hr = _h(t, _cid0)
+        if _hr is not None:
+            await update.message.reply_text(_hr)
+            return
     _lcid = update.effective_chat.id if getattr(update, "effective_chat", None) else None
     if (_lcid and _LIAR_GAMES.get(_lcid)) or t.startswith("大話"):
         _r = _liar_handle(_lcid, t)

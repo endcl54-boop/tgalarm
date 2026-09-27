@@ -3426,6 +3426,103 @@ class TestShortForms(unittest.TestCase):
         self.assertEqual(m.group(1), "東京")
 
 
+class TestFiveFeatures(unittest.TestCase):
+    """隨機擴展：倒數日／分組／習慣提醒／專注模式／電量守。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._oc = bot.JOBS_PATH, bot.COUNTDOWNS_PATH
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot.COUNTDOWNS_PATH = os.path.join(self._tmp, "c.json")
+        self._arm, self._si, self._ss = bot._arm, bot.run_intent, bot._send_safe
+        self._arm = bot._arm
+        bot._arm = lambda j: None
+        self.seen = {"msgs": []}
+        bot.run_intent = (lambda cmd: self.seen.update(cmd=" ".join(cmd))
+                          or (True, "OK"))
+
+        async def fs(cid, msg, tag=""):
+            self.seen["msgs"].append(msg)
+        bot._send_safe = fs
+
+    def tearDown(self):
+        bot.JOBS_PATH, bot.COUNTDOWNS_PATH = self._oj, self._oc
+        bot._arm, bot.run_intent, bot._send_safe = self._arm, self._si, self._ss
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_countdown(self):
+        r = bot._countdown_handle("倒數 考試 2027-05-04", 1)
+        self.assertIn("仲有", r)
+        r2 = bot._countdown_handle("倒數 聖誕 12-25", 1)
+        self.assertIn("每年", r2)
+        self.assertIn("聖誕", bot._countdown_handle("倒數", 1))
+        self.assertIn("已刪", bot._countdown_handle("刪倒數 考試", 1))
+        self.assertIn("唔存在", bot._countdown_handle("倒數 壞 2027-13-40", 1))
+
+    def test_groups(self):
+        r = bot._groups_handle("分組 3 阿明,阿強,阿寶,小明,阿偉")
+        self.assertEqual(r.count("組："), 3)
+        names = sum(len(l.split("：")[1].split("、")) for l in r.splitlines()[1:])
+        self.assertEqual(names, 5)
+        self.assertIn("分唔到", bot._groups_handle("分組 9 A,B"))
+        self.assertIsNone(bot._groups_handle("唔係分組"))
+
+    def test_nag_job_and_fire(self):
+        now = dt.datetime.now()
+        r = bot._nag_handle("提醒 每60分 飲水", 1)
+        self.assertIn("每 60 分鐘", r)
+        jobs = bot._jobs()
+        self.assertEqual(jobs[0]["type"], "nag")
+        self.assertEqual(jobs[0]["every"], 3600)
+        asyncio.run(bot._fire_later(dict(jobs[0]), 0))
+        self.assertIn("飲水", self.seen["msgs"][-1])
+        # 每日 0700 播嗰類唔會被「提醒」字眼誤食
+        self.assertIsNone(bot._nag_handle("提醒 每700分", 1))
+
+    def test_focus_loop(self):
+        r = bot._focus_handle("專注 25 數學", 1)
+        self.assertIn("25 分鐘工作", r)
+        self.assertIn("5 分鐘休息", r)
+        jobs = bot._jobs()
+        self.assertEqual((jobs[0]["type"], jobs[0]["wmin"], jobs[0]["bmin"],
+                          jobs[0]["phase"]), ("focus", 25, 5, "work"))
+        asyncio.run(bot._fire_later(dict(jobs[0]), 0))
+        self.assertIn("SET_TIMER", self.seen["cmd"])
+        self.assertIn("1500", self.seen["cmd"])          # 25 分鐘落計時器
+        self.assertIn("專注 25 分鐘", self.seen["msgs"][-1])
+        self.assertEqual(bot._jobs()[0]["phase"], "break")
+        r2 = bot._focus_handle("專注結束", 1)
+        self.assertIn("收工", r2)
+        self.assertEqual([j for j in bot._jobs()
+                          if j.get("type") == "focus"], [])
+
+    def test_battery_guard(self):
+        now = dt.datetime.now()
+        r = bot._battery_handle("電量守 20", 1)
+        self.assertIn("電量守開工", r)
+        job = bot._jobs()[0]
+        self.assertEqual((job["type"], job["thr"]), ("battery", 20))
+        bot._battery_status = lambda: (15, False, 33.0)
+        asyncio.run(bot._fire_later(dict(job), 0))
+        self.assertIn("15%", self.seen["msgs"][-1])
+        self.assertTrue(bot._jobs()[0]["alerted"])
+        bot._battery_status = lambda: (80, True, 30.0)
+        n = len(self.seen["msgs"])
+        asyncio.run(bot._fire_later(dict(bot._jobs()[0]), 0))
+        self.assertEqual(len(self.seen["msgs"]), n)      # 冇事靜默
+        self.assertFalse(bot._jobs()[0]["alerted"])
+        self.assertIn("收工", bot._battery_handle("電量守完", 1))
+
+    def test_jobs_list_icons(self):
+        now = dt.datetime.now()
+        bot._nag_handle("提醒 每30分 飲水", 1)
+        bot._focus_handle("專注 25", 1)
+        r = bot._fmt_jobs(now)
+        self.assertIn("💧", r)
+        self.assertIn("🎯", r)
+        self.assertIn("每30分 飲水", r)
+
+
 class TestWaitWall(unittest.TestCase):
     """牆鐘分段等：deep sleep（monotonic 凍結）都唔會拖遲排程。"""
 
