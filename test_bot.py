@@ -3372,6 +3372,60 @@ class TestWebPage(unittest.TestCase):
         self.assertIn("開網頁「新聞」", seen["msg"])
 
 
+class TestShortForms(unittest.TestCase):
+    """減阻力短式：開 X／去 X／計時淨數字／鬧鐘整點／X時間。"""
+
+    def test_short_open_and_go(self):
+        c = bot.parse_player("開 新聞")
+        self.assertEqual((c.action, c.ref), ("web", "新聞"))
+        c2 = bot.parse_player("去 公司")
+        self.assertEqual((c2.action, c2.ref), ("nav", "公司"))
+        c3 = bot.parse_player("0830 去 公司")
+        self.assertEqual((c3.action, c3.hour, c3.minute, c3.ref),
+                         ("sched_nav", 8, 30, "公司"))
+        c4 = bot.parse_player("每日 0900 開 新聞")
+        self.assertEqual(c4.action, "sched_web_daily")
+        c5 = bot.parse_player("開 https://example.com")
+        self.assertEqual((c5.action, c5.ref), ("web", "https://example.com"))
+        self.assertIsNone(bot.parse_player("開枱"))  # 開枱唔關 player 事（大話骰用）
+
+    def test_liar_yields_open_go(self):
+        bot._LIAR_GAMES.clear()
+        bot._LIAR_GAMES[13] = bot._liar.new_game(starter="you")
+        try:
+            self.assertIsNone(bot._liar_handle(13, "開 新聞"))
+            self.assertIsNone(bot._liar_handle(13, "去 公司"))
+            r = bot._liar_handle(13, "開")          # 單字「開」仍係攤牌
+            self.assertIsNotNone(r)
+        finally:
+            bot._LIAR_GAMES.clear()
+
+    def test_bare_number_timer_and_alarm_hour(self):
+        self.assertEqual(bot.parse_command("計時 25").seconds, 1500)
+        self.assertEqual(bot.parse_command("計時 90").seconds, 5400)
+        p = bot.parse_command("計時 25 杯麵")
+        self.assertEqual((p.seconds, p.label), (1500, "杯麵"))
+        # 3-4 位保留 hhmm 語義
+        self.assertEqual(bot.parse_command("計時 700").fire_at.strftime("%H:%M"),
+                         "07:00")
+        self.assertEqual(bot.parse_command("計時 1830").fire_at.strftime("%H:%M"),
+                         "18:30")
+        # 鬧鐘整點
+        self.assertEqual(bot.parse_command("鬧鐘 7").fire_at.strftime("%H:%M"),
+                         "07:00")
+        self.assertEqual(bot.parse_command("鬧鐘 23").fire_at.strftime("%H:%M"),
+                         "23:00")
+        self.assertIsNone(bot.parse_command("鬧鐘 25"))
+        # 單位寫法照舊
+        self.assertEqual(bot.parse_command("計時 25分鐘").seconds, 1500)
+
+    def test_city_time_suffix(self):
+        import re as _re
+        m = _re.fullmatch(r"([\u4e00-\u9fff\w]{1,12})時間", "東京時間")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "東京")
+
+
 class TestWaitWall(unittest.TestCase):
     """牆鐘分段等：deep sleep（monotonic 凍結）都唔會拖遲排程。"""
 

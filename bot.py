@@ -185,7 +185,12 @@ def _next_occurrence(now: dt.datetime, hour: int, minute: int) -> dt.datetime:
 
 
 def _parse_duration(rest: str) -> tuple:
-    """回傳 (秒數, 消耗到邊個字位)。未能解析回傳 (0, 0)。"""
+    """回傳 (秒數, 消耗到邊個字位)。未能解析回傳 (0, 0)。
+    淨 1-2 位數字＝分鐘（「計時 25」＝25分鐘——減阻力；
+    3-4 位保留畀 hhmm：「計時 700」＝計時到 07:00）。"""
+    m = re.match(r"\s*(\d{1,2})(?=\s|$)", rest)
+    if m and not re.match(r"\s*[a-zA-Z]", rest[m.end():]):
+        return int(m.group(1)) * 60, m.end()   # 後面跟英文（2 days）→唔當分鐘
     # 「N個半鐘/天」「N個半小時/日」
     m = re.match(r"(\d+(?:\.\d+)?)\s*個?半\s*(小時|個?鐘|天|日)", rest)
     if m:
@@ -233,7 +238,14 @@ def _read_start_tok(tok: str):
 
 
 def _read_hhmm(rest: str):
-    """由字頭讀 HH:MM / hhmm，回傳 (時, 分, 剩餘字串) 或 None。"""
+    """由字頭讀 HH:MM / hhmm，回傳 (時, 分, 剩餘字串) 或 None。
+    淨 1-2 位數字＝整點（「鬧鐘 7」＝07:00）。"""
+    t = re.match(r"(\d{1,2})(?=\s|$)", rest)
+    if t:
+        hh = int(t.group(1))
+        if hh <= 23:
+            return hh, 0, rest[t.end():].strip()
+        return None
     t = _TIME.match(rest)
     if not t:
         return None
@@ -506,6 +518,9 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.fullmatch(r"(?:開網頁|网页開|open_web)\s+(.+)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("web", ref=m.group(1).strip())
+    m = re.fullmatch(r"開\s+(\S.*)", s, re.IGNORECASE)
+    if m:
+        return PlayerCmd("web", ref=m.group(1).strip())
     # 置頂待辦清單
     if re.fullmatch(r"(?:待辦|todo|todolist|清單)", s, re.IGNORECASE):
         return PlayerCmd("todo")
@@ -577,10 +592,10 @@ def parse_player(text: str) -> PlayerCmd | None:
                     return PlayerCmd("sched_timer_daily", hour=hh, minute=mm,
                                      ref=tm.group(1)[end:].strip(), seconds=seconds)
                 return None
-            nm = re.match(r"(?:開導航|導航)\s*(.+)$", rest)
+            nm = re.match(r"(?:開導航|導航|去)\s*(.+)$", rest)
             if nm:
                 return PlayerCmd("sched_nav_daily", hour=hh, minute=mm, ref=nm.group(1).strip())
-            wm = re.match(r"(?:開網頁|網頁)\s*(.+)$", rest)
+            wm = re.match(r"(?:開網頁|網頁|開)\s*(.+)$", rest)
             if wm:
                 return PlayerCmd("sched_web_daily", hour=hh, minute=mm, ref=wm.group(1).strip())
             pm = re.match(r"(隨機播放|隨機播|播(?:放)?)\s*(.*)$", rest)
@@ -600,10 +615,10 @@ def parse_player(text: str) -> PlayerCmd | None:
                 return PlayerCmd("sched_timer", hour=hh, minute=mm,
                                  ref=tm.group(1)[end:].strip(), seconds=seconds)
             return None
-        nm = re.match(r"(?:開導航|導航)\s*(.+)$", rest)
+        nm = re.match(r"(?:開導航|導航|去)\s*(.+)$", rest)
         if nm:
             return PlayerCmd("sched_nav", hour=hh, minute=mm, ref=nm.group(1).strip())
-        wm = re.match(r"(?:開網頁|網頁)\s*(.+)$", rest)
+        wm = re.match(r"(?:開網頁|網頁|開)\s*(.+)$", rest)
         if wm:
             return PlayerCmd("sched_web", hour=hh, minute=mm, ref=wm.group(1).strip())
         pm = re.match(r"(隨機播放|隨機播|播(?:放)?)\s*(.*)$", rest)
@@ -612,7 +627,7 @@ def parse_player(text: str) -> PlayerCmd | None:
             return PlayerCmd("sched_once", ref=ref, hour=hh, minute=mm,
                              shuffle="隨機" in pm.group(1) or sh)
         return None  # 淨時間行：留返畀批次繼承用
-    m = re.fullmatch(r"(?:開導航|導航|nav)\s*(.*)", s, re.IGNORECASE)
+    m = re.fullmatch(r"(?:開導航|導航|nav|去)\s*(.*)", s, re.IGNORECASE)
     if m:
         if not m.group(1).strip():
             return PlayerCmd("dests")  # 淨「導航」：顯示地點清單同用法
@@ -1220,6 +1235,8 @@ def _liar_handle(chat_id: int, t: str):
     if _liar is None:
         return None
     st = _LIAR_GAMES.get(chat_id)
+    if t.startswith(("開 ", "去 ")):
+        return None                     # 開網頁／導航——唔關大話骰事
     if t in ("大話", "大話骰", "玩大話", "開枱"):
         if st and not st["over"]:
             return "開咗枱喇——繼續！開=攤牌，大話結束=收工。"
@@ -3020,6 +3037,10 @@ async def _on_message(update, context):
         return
     if t.startswith("時間 ") or t == "時間":
         await update.message.reply_text(_time_reply(t[2:].strip()))
+        return
+    m = re.fullmatch(r"([\u4e00-\u9fff\w]{1,12})時間", t)
+    if m:
+        await update.message.reply_text(_time_reply(m.group(1)))
         return
     _tw = _takeaway_handle(t)
     if _tw is not None:
