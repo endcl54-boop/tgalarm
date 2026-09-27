@@ -1464,6 +1464,9 @@ except Exception:  # noqa: BLE001
     _liar = None
 _LIAR_GAMES: dict = {}
 _LIAR_DICE_RE = re.compile(r"^\s*我?\s*((?:[1-6]\s+){4}[1-6])\s*$")
+if _liar is not None:
+    _liar.CAREER_PATH = os.path.expanduser(
+        os.environ.get("TGALARM_LIAR_CAREER", "~/.tgalarm/liar_career.json"))
 
 
 def _liar_handle(chat_id: int, t: str):
@@ -1471,6 +1474,14 @@ def _liar_handle(chat_id: int, t: str):
     if _liar is None:
         return None
     st = _LIAR_GAMES.get(chat_id)
+    if t == "戰績":
+        car = {}
+        if _liar.CAREER_PATH:
+            car = _load_json(_liar.CAREER_PATH, {"you": 0, "bot": 0}) or {}
+        out = f"📜 生涯戰績：你 {car.get('you', 0)}：{car.get('bot', 0)} 我"
+        if st:
+            out += f"\n今場：你 {st['you_wins']}：{st['bot_wins']} 我"
+        return out
     if t.startswith(("開 ", "去 ")):
         return None                     # 開網頁／導航——唔關大話骰事
     if t in ("大話", "大話骰", "玩大話", "開枱"):
@@ -1490,8 +1501,11 @@ def _liar_handle(chat_id: int, t: str):
         return None
     if t in ("大話結束", "收工", "唔玩"):
         _LIAR_GAMES.pop(chat_id, None)
-        return (f"收工。戰績：你 {st['you_wins']}"
-                f"：{st['bot_wins']} 我 🤝")
+        car = {}
+        if _liar.CAREER_PATH:
+            car = _load_json(_liar.CAREER_PATH, {"you": 0, "bot": 0}) or {}
+        return (f"收工。今場戰績 你 {st['you_wins']}：{st['bot_wins']} 我 🤝"
+                f"\n📜 生涯戰績：你 {car.get('you', 0)}：{car.get('bot', 0)} 我")
     if st["over"]:
         _LIAR_GAMES.pop(chat_id, None)
         return None

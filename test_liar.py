@@ -2,6 +2,7 @@
 """大話骰引擎測試：數學對 brute force、合法性、NN 推理、速度、全流程。"""
 import asyncio
 import random
+import tempfile
 import time
 import unittest
 
@@ -342,6 +343,42 @@ class TestJaiPai(unittest.TestCase):
         rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
         self.assertIn("注 2 分", rep)
         self.assertEqual(st["you_wins"], 2)
+
+
+class TestCareer(unittest.TestCase):
+    """生涯戰績：攤牌計分自動入冊，重啟都記得；「戰績」隨時查。"""
+
+    def setUp(self):
+        self._path = tempfile.mktemp()
+        self._old = liar.CAREER_PATH
+        liar.CAREER_PATH = self._path
+        bot._LIAR_GAMES.clear()
+
+    def tearDown(self):
+        liar.CAREER_PATH = self._old
+        bot._LIAR_GAMES.clear()
+
+    def test_declare_updates_career(self):
+        st = liar.new_game(starter="you")
+        st["bot"] = [5, 5, 1, 3, 3]
+        st["bid"], st["bidder"], st["turn"] = (3, 5, False), "bot", "you"
+        liar.user_challenge(st, stake=2)
+        rep, _ = liar.user_dice_declare(st, "我 2 2 2 2 2")
+        self.assertIn("生涯", rep)
+        import json as _json
+        car = _json.load(open(self._path))
+        # bot 手 [5,5,1,3,3] 有百搭：3個5 夠數→你反劈輸 4 分入你冊
+        self.assertEqual(car, {"you": 4, "bot": 0})
+        self.assertIn("你4：0我", rep.replace(" ", ""))
+
+    def test_glue_score_command(self):
+        r = bot._liar_handle(21, "戰績")              # 冇局都答
+        self.assertIn("生涯戰績", r)
+        bot._LIAR_GAMES[21] = liar.new_game(starter="you")
+        bot._LIAR_GAMES[21]["you_wins"] = 3
+        r2 = bot._liar_handle(21, "戰績")
+        self.assertIn("今場", r2)
+        self.assertIn("3", r2)
 
 
 class TestOpeningRules(unittest.TestCase):

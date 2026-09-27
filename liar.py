@@ -17,12 +17,14 @@
   2. NN 層：13→24→6 MLP（自我對弈訓練，權重烘焙），純 Python 推理
   3. 對手建模：出價質素 EMA → 緊逼（鏡像）／攻擊閘切換
 """
+import json
 import math
 import re
 import secrets
 
 WILD = 1
 MAX_Q = 15
+CAREER_PATH = None      # bot.py 會設定（~/.tgalarm/liar_career.json）——生涯戰績
 CH_VETO_LO = 0.12
 CH_GATE_BASE = 0.45
 CH_GATE_MAX = 0.70
@@ -390,6 +392,24 @@ def user_dice_declare(st, text: str):
         st["bot_wins"] += stake
     else:
         st["you_wins"] += stake
+    car = None
+    if CAREER_PATH:
+        try:
+            with open(CAREER_PATH, encoding="utf-8") as fh:
+                car = json.load(fh)
+        except Exception:
+            car = None
+        if not isinstance(car, dict) or ("you" not in car or "bot" not in car):
+            car = {"you": 0, "bot": 0}
+        if loser == "you":
+            car["you"] = car.get("you", 0) + stake
+        else:
+            car["bot"] = car.get("bot", 0) + stake
+        try:
+            with open(CAREER_PATH, "w", encoding="utf-8") as fh:
+                json.dump(car, fh)
+        except Exception:
+            car = None
     if bidder == "you":
         st["u_bids"] += 1
         st["u_false"] = 0.7 * st.get("u_false", 0.0) + 0.3 * (0.0 if ok else 1.0)
@@ -397,8 +417,9 @@ def user_dice_declare(st, text: str):
     who = "你" if loser == "you" else "我"
     detail = (f"{'淨計' if jai or f == WILD else '加埋'}「{f}」共 {cnt} 粒"
               f"（叫 {bid_text(q, f, jai)}{'，注 ' + str(stake) + ' 分' if stake > 1 else ''}）")
+    career = (f"（生涯 你{car['you']}：{car['bot']}我）" if car else "")
     lines = [f"🎬 攤牌！你：{' '.join(map(str, ud))}　我：{' '.join(map(str, bd))}",
-             f"{detail} → {verdict}{who}輸。戰績 你{st['you_wins']}：{st['bot_wins']}我"]
+             f"{detail} → {verdict}{who}輸。戰績 你{st['you_wins']}：{st['bot_wins']}我{career}"]
     st["await_dice"] = False
     st["bid"], st["bidder"] = None, None
     st["jai"] = False
