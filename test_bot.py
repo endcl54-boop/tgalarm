@@ -3270,6 +3270,108 @@ if __name__ == "__main__":
     unittest.main(verbosity=2)
 
 
+class TestWebPage(unittest.TestCase):
+    """定時開自定義網頁：儲存／清單／即刻開／排程／到點 fire。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._old_webs, self._old_jobs = bot.WEBS_PATH, bot.JOBS_PATH
+        bot.WEBS_PATH = os.path.join(self._tmp, "webs.json")
+        bot.JOBS_PATH = os.path.join(self._tmp, "jobs.json")
+        self._arm, self._shell = bot._arm, bot._shell_priv_exec
+        self._si, self._dry = bot.run_intent, bot.DRY_RUN
+        bot.DRY_RUN = False
+        bot._arm = lambda j: None
+        bot._shell_priv_exec = lambda *a, **k: None
+
+    def tearDown(self):
+        bot.WEBS_PATH, bot.JOBS_PATH = self._old_webs, self._old_jobs
+        bot._arm, bot._shell_priv_exec = self._arm, self._shell
+        bot.run_intent, bot.DRY_RUN = self._si, self._dry
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _p(self, line):
+        return bot.parse_player(line)
+
+    def test_web_intent_cmd(self):
+        cmd = " ".join(bot.web_intent_cmd("https://example.com"))
+        self.assertIn("android.intent.action.VIEW", cmd)
+        self.assertIn("-d https://example.com", cmd)
+
+    def test_web_parse(self):
+        self.assertEqual((self._p("網頁").action), "webs")
+        c = self._p("網頁 新聞 https://news.rthk.hk")
+        self.assertEqual((c.action, c.ref, c.url), ("saveweb", "新聞", "https://news.rthk.hk"))
+        self.assertEqual(self._p("刪網頁 新聞").action, "delweb")
+        c2 = self._p("開網頁 新聞")
+        self.assertEqual((c2.action, c2.ref), ("web", "新聞"))
+        c3 = self._p("0830 開網頁 新聞")
+        self.assertEqual((c3.action, c3.hour, c3.minute, c3.ref),
+                         ("sched_web", 8, 30, "新聞"))
+        c4 = self._p("每日 0900 開網頁 新聞")
+        self.assertEqual((c4.action, c4.hour, c4.minute),
+                         ("sched_web_daily", 9, 0))
+
+    def test_web_save_list_delete(self):
+        now = dt.datetime(2026, 9, 27, 12, 0)
+        r = bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
+        self.assertIn("已儲存", r)
+        r2 = bot._execute_player(self._p("網頁"), 1, now)
+        self.assertIn("news.rthk.hk", r2)
+        r3 = bot._execute_player(self._p("網頁 壞連結 唔係url"), 1, now)
+        self.assertIn("http", r3)                     # 要齊 http(s) 開頭
+        r4 = bot._execute_player(self._p("刪網頁 新聞"), 1, now)
+        self.assertIn("已刪", r4)
+
+    def test_web_open_now(self):
+        now = dt.datetime(2026, 9, 27, 12, 0)
+        bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
+        seen = {}
+        bot.run_intent = lambda cmd: seen.update(cmd=" ".join(cmd)) or (True, "OK")
+        r = bot._execute_player(self._p("開網頁 新聞"), 1, now)
+        self.assertIn("開緊網頁", r)
+        self.assertIn("VIEW", seen["cmd"])
+        self.assertIn("news.rthk.hk", seen["cmd"])
+        r2 = bot._execute_player(self._p("開網頁 https://example.com"), 1, now)
+        self.assertIn("example.com", r2)
+        r3 = bot._execute_player(self._p("開網頁 冇呢個"), 1, now)
+        self.assertIn("搵唔到", r3)
+
+    def test_web_schedule_creates_job(self):
+        now = dt.datetime(2026, 9, 27, 12, 0)
+        bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
+        made = {}
+        bot._arm = lambda j: made.setdefault("armed", j)
+        r = bot._execute_player(self._p("每日 0900 開網頁 新聞"), 1, now)
+        self.assertIn("已排程", r)
+        self.assertIn("每日", r)
+        job = made["armed"]
+        self.assertEqual(job["type"], "web")
+        self.assertTrue(job["daily"])
+        self.assertEqual(job["url"], "https://news.rthk.hk")
+        self.assertEqual((job["hh"], job["mm"]), (9, 0))
+
+    def test_web_fire_opens_browser(self):
+        now = dt.datetime(2026, 9, 27, 12, 0)
+        bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
+        seen = {}
+        bot.run_intent = lambda cmd: seen.update(cmd=" ".join(cmd)) or (True, "OK")
+
+        async def fake_send(cid, msg, tag=""):
+            seen["msg"] = msg
+        bot._send_safe = fake_send
+        self._sendsafe = None
+        job = {"id": 99, "type": "web", "hh": 9, "mm": 0, "daily": False,
+               "url": "https://news.rthk.hk", "label": "新聞",
+               "chat_id": 1, "next": now.isoformat(), "seconds": 0,
+               "mode": "", "shuffle": False, "paused": False}
+        asyncio.run(bot._fire_later(job, 0))
+        self.assertIn("VIEW", seen["cmd"])
+        self.assertIn("news.rthk.hk", seen["cmd"])
+        self.assertIn("到點", seen["msg"])
+        self.assertIn("開網頁「新聞」", seen["msg"])
+
+
 class TestWaitWall(unittest.TestCase):
     """牆鐘分段等：deep sleep（monotonic 凍結）都唔會拖遲排程。"""
 

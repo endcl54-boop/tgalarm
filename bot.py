@@ -61,6 +61,7 @@ TAKEAWAY_PATH = os.path.expanduser(
     os.environ.get("TGALARM_TAKEAWAY", "~/.tgalarm/takeaway.json"))
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
 DESTINATIONS_PATH = os.path.expanduser(os.environ.get("TGALARM_DESTINATIONS", "~/.tgalarm/destinations.json"))
+WEBS_PATH = os.path.expanduser(os.environ.get("TGALARM_WEBS", "~/.tgalarm/webs.json"))
 TODO_PATH = os.path.expanduser(os.environ.get("TGALARM_TODO", "~/.tgalarm/todo.json"))
 _YT_PKG = "com.google.android.youtube"
 
@@ -137,6 +138,7 @@ HELP = (
     "🧭 導航（Google Maps）：\n"
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
+    "🌐 網頁：・網頁 新聞 https://…（儲）・開網頁 新聞　・0830 開網頁 新聞・每日 0900 開網頁 新聞\n"
     "📋 待辦（自動置頂，撳按鈕打勾）：\n"
     "・待辦 牛奶、交電費（加項目）　・待辦（睇清單）\n"
     "・完成 2　・未做 2　・刪 2　・清除已完成\n"
@@ -492,6 +494,18 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.fullmatch(r"(?:地點|目的地|set_place)\s+([^\s＝=：:]+)\s*(?:[＝=：:]\s*)?(.+)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("savedest", ref=m.group(1), url=m.group(2).strip())
+    # 網頁
+    if re.fullmatch(r"(?:網頁|网页|webs)", s, re.IGNORECASE):
+        return PlayerCmd("webs")
+    m = re.fullmatch(r"(?:刪網頁|刪除網頁|del_web)\s+(.+)", s, re.IGNORECASE)
+    if m:
+        return PlayerCmd("delweb", ref=m.group(1).strip())
+    m = re.fullmatch(r"(?:網頁|网页|set_web)\s+([^\s＝=：:]+)\s*(?:[＝=：]\s*)?(.+)", s, re.IGNORECASE)
+    if m:
+        return PlayerCmd("saveweb", ref=m.group(1), url=m.group(2).strip())
+    m = re.fullmatch(r"(?:開網頁|网页開|open_web)\s+(.+)", s, re.IGNORECASE)
+    if m:
+        return PlayerCmd("web", ref=m.group(1).strip())
     # 置頂待辦清單
     if re.fullmatch(r"(?:待辦|todo|todolist|清單)", s, re.IGNORECASE):
         return PlayerCmd("todo")
@@ -566,6 +580,9 @@ def parse_player(text: str) -> PlayerCmd | None:
             nm = re.match(r"(?:開導航|導航)\s*(.+)$", rest)
             if nm:
                 return PlayerCmd("sched_nav_daily", hour=hh, minute=mm, ref=nm.group(1).strip())
+            wm = re.match(r"(?:開網頁|網頁)\s*(.+)$", rest)
+            if wm:
+                return PlayerCmd("sched_web_daily", hour=hh, minute=mm, ref=wm.group(1).strip())
             pm = re.match(r"(隨機播放|隨機播|播(?:放)?)\s*(.*)$", rest)
             if pm:
                 ref, sh = _strip_shuffle(pm.group(2))
@@ -586,6 +603,9 @@ def parse_player(text: str) -> PlayerCmd | None:
         nm = re.match(r"(?:開導航|導航)\s*(.+)$", rest)
         if nm:
             return PlayerCmd("sched_nav", hour=hh, minute=mm, ref=nm.group(1).strip())
+        wm = re.match(r"(?:開網頁|網頁)\s*(.+)$", rest)
+        if wm:
+            return PlayerCmd("sched_web", hour=hh, minute=mm, ref=wm.group(1).strip())
         pm = re.match(r"(隨機播放|隨機播|播(?:放)?)\s*(.*)$", rest)
         if pm:
             ref, sh = _strip_shuffle(pm.group(2))
@@ -624,6 +644,10 @@ def alarm_intent_cmd(hour: int, minute: int, label: str) -> list:
         "--es", "android.intent.extra.alarm.MESSAGE", label or "Telegram 鬧鐘",
         "--ez", "android.intent.extra.alarm.SKIP_UI", "true" if SKIP_UI else "false",
     ]
+
+
+def web_intent_cmd(url: str) -> list:
+    return ["am", "start", "-a", "android.intent.action.VIEW", "-d", url]
 
 
 def run_intent(cmd: list) -> tuple:
@@ -1422,6 +1446,34 @@ def _fmt_dests() -> str:
     return "\n".join(lines)
 
 
+def _webs() -> dict:
+    return _load_json(WEBS_PATH, {})
+
+
+def _web_target(ref: str) -> tuple:
+    """名→已儲 url；http(s) 開頭→直接用。回傳 (url, None) 或 (None, 錯誤訊息)。"""
+    r = ref.strip()
+    if r.lower().startswith(("http://", "https://")):
+        return r, None
+    w = _webs()
+    if r in w:
+        return w[r], None
+    return None, f"搵唔到網頁「{r}」。send「網頁」睇清單，或者直接俾 https:// 連結"
+
+
+def _fmt_webs() -> str:
+    w = _webs()
+    if not w:
+        return ("🌐 仲未有網頁。send：網頁 新聞 https://news.rthk.hk\n"
+                "之後可以：開網頁 新聞・0830 開網頁 新聞・每日 0900 開網頁 新聞・刪網頁 新聞")
+    lines = ["🌐 已儲存網頁："]
+    for name, u in w.items():
+        disp = u if len(u) <= 40 else u[:37] + "…"
+        lines.append(f"・{name}：{disp}")
+    lines.append("用法：開網頁 名・0830 開網頁 名・每日 0900 開網頁 名・刪網頁 名")
+    return "\n".join(lines)
+
+
 # ---------------- 置頂待辦清單 ----------------
 
 def _todos() -> dict:
@@ -1787,7 +1839,7 @@ def _fmt_jobs(now: dt.datetime) -> str:
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
-                "bell": "⏰", "weather": "🌤"}.get(j.get("type"), "🎵")
+                "bell": "⏰", "weather": "🌤", "web": "🌐"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
         else:
@@ -1959,6 +2011,12 @@ async def _fire_later(job: dict, delay: float) -> None:
                 if not _rish_available() and not _adb_lane_available():
                     how += ("\n⚠️ Shizuku 同 adb lane 都冇行——導航可能彈唔出！"
                             "入 Shizuku app 撳「啟動」，或者 send「復活Shizuku」")
+    elif jtype == "web":
+        if not DRY_RUN:
+            _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 著螢幕
+        wurl = job.get("url") or job.get("label", "")
+        ok, info = run_intent(web_intent_cmd(wurl))
+        how = f"開網頁「{job.get('label')}」{wurl}"
     else:
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"
@@ -2235,9 +2293,11 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
     """新增排程；同類型同時間嘅舊排程會被取代。回傳 (job, 被取代嘅 id 列表)。"""
     is_timer = cmd.action in ("sched_timer", "sched_timer_daily")
     is_nav = cmd.action in ("sched_nav", "sched_nav_daily")
+    is_web = cmd.action in ("sched_web", "sched_web_daily")
     is_series = cmd.action in ("series", "series_daily")
     jtype = ("series" if is_series
-             else ("timer" if is_timer else ("nav" if is_nav else "play")))
+             else ("timer" if is_timer
+                   else ("nav" if is_nav else ("web" if is_web else "play"))))
     jobs = _jobs()
     # 去重：同類型 + 同 hh:mm  collide → 取代舊嘅
     replaced = [j["id"] for j in jobs
@@ -2253,12 +2313,15 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
         default_label = ""
     elif is_nav:
         default_label = "目的地"
+    elif is_web:
+        default_label = "網頁"
     else:
         default_label = _playlists().get("default") or "歌單"
     first = _next_occurrence(now, cmd.hour, cmd.minute)
     job = {"id": jid, "type": jtype, "hh": cmd.hour, "mm": cmd.minute,
            "daily": cmd.action in ("sched_daily", "sched_timer_daily",
-                                   "sched_nav_daily", "series_daily"),
+                                   "sched_nav_daily", "sched_web_daily",
+                                   "series_daily"),
            "url": url, "seconds": seconds, "mode": mode,
            "label": label or cmd.ref or default_label,
            "chat_id": chat_id, "next": first.isoformat(),
@@ -2606,6 +2669,17 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         msg = (f"🗓 已排程（{kind} #{job['id']}）：{when} "
                f"導航去「{job['label']}」（{_mode_label(mode)}）")
         return msg + _replaced_note(replaced)
+    if a in ("sched_web", "sched_web_daily"):
+        url, err = _web_target(cmd.ref)
+        if not url:
+            return err
+        label = (cmd.ref if url != cmd.ref
+                 else url.split("//", 1)[-1][:30].rstrip("/"))
+        job, replaced = _add_job(cmd, chat_id, now, url=url, label=label)
+        kind = "每日" if a == "sched_web_daily" else "一次"
+        when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
+        msg = f"🗓 已排程（{kind} #{job['id']}）：{when} 開網頁「{job['label']}」"
+        return msg + _replaced_note(replaced)
     if a in ("sched_alloc", "sched_alloc_daily"):
         if not (0 <= cmd.buf <= 90):
             return "❓ 留空要 0-90% 之內"
@@ -2746,6 +2820,34 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
             _save_json(DESTINATIONS_PATH, d)
             return f"🗑 已刪地點「{cmd.ref}」"
         return f"搵唔到地點「{cmd.ref}」"
+    if a == "webs":
+        return _fmt_webs()
+    if a == "saveweb":
+        u = cmd.url.strip()
+        if not u.lower().startswith(("http://", "https://")):
+            return "❓ 連結要齊 http(s):// 開頭。例：網頁 新聞 https://news.rthk.hk"
+        w = _webs()
+        w[cmd.ref] = u
+        _save_json(WEBS_PATH, w)
+        return f"🔗 已儲存網頁「{cmd.ref}」＝{u}"
+    if a == "delweb":
+        w = _webs()
+        if cmd.ref in w:
+            del w[cmd.ref]
+            _save_json(WEBS_PATH, w)
+            return f"🗑 已刪網頁「{cmd.ref}」"
+        return f"搵唔到網頁「{cmd.ref}」。send「網頁」睇清單"
+    if a == "web":
+        url, err = _web_target(cmd.ref)
+        if not url:
+            return err
+        if not DRY_RUN:
+            _shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 著螢幕
+        ok, info = run_intent(web_intent_cmd(url))
+        if ok:
+            shown = cmd.ref if url == cmd.ref.strip() else f"{cmd.ref}（{url}）"
+            return f"🌐 開緊網頁：{shown}"
+        return f"❌ 開唔到網頁：{info[:120]}"
     if a == "nav":
         dest, mode, shown = _nav_target(cmd.ref)
         if not DRY_RUN:
