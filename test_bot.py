@@ -346,12 +346,22 @@ class TestTimerCap(unittest.TestCase):
         self.assertIsNotNone(p)
         self.assertIn("超過計時上限", _execute(p, NOW))
 
-    def test_exactly_99999h_creates_bell_job(self):
-        p = parse_command("計時 99999小時", NOW)
-        self.assertEqual(p.seconds, 99999 * 3600)
-        r = _execute(p, NOW, chat_id=1)
+    def test_99999h_goes_to_clock_app(self):
+        """手機計時器上限 99999 小時（用戶證實）——最大值都直接落 app。"""
+        seen = {}
+        def fake(cmd):
+            seen["cmd"] = " ".join(cmd)
+            return True, "OK"
+        old = bot.run_intent
+        bot.run_intent = fake
+        try:
+            p = parse_command("計時 99999小時", NOW)
+            r = _execute(p, NOW, chat_id=1)
+        finally:
+            bot.run_intent = old
         self.assertNotIn("超過計時上限", r)
-        self.assertIn("#1", r)                     # 入咗排程（統一 bot 守）
+        self.assertIn("已落手機時鐘", r)
+        self.assertIn(str(99999 * 3600), seen["cmd"])   # Int 裝得落
 
     def test_timer_goes_to_clock_app(self):
         seen = {}
@@ -396,18 +406,15 @@ class TestTimerCap(unittest.TestCase):
         self.assertIn("#1", r)
         self.assertIn("設唔到", r)
 
-    def test_over_phone_cap_uses_bell_chain(self):
+    def test_timer_intent_fail_falls_back_to_bell(self):
         old = bot.run_intent
-        def boom(cmd):
-            raise AssertionError("超cap唔應該掂 intent")
-        bot.run_intent = boom
+        bot.run_intent = lambda cmd: (False, "boom")
         try:
-            p = parse_command("計時 99999小時", NOW)
-            r = _execute(p, NOW, chat_id=1)
+            r = _execute(parse_command("計時 25分鐘", NOW), NOW, chat_id=1)
         finally:
             bot.run_intent = old
-        self.assertIn("99小時59分", r)
         self.assertIn("#1", r)
+        self.assertIn("設唔到", r)
 
 
 class TestPlayerGrammar(unittest.TestCase):

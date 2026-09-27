@@ -2770,9 +2770,6 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
 
 # ---------------- Telegram handlers（延後 import，等 parser 可以單獨測試） ----------------
 
-_PHONE_TIMER_MAX = 99 * 3600 + 59 * 60 + 59   # 手機時鐘 app 計時器上限 99:59:59
-
-
 def _add_bell(chat_id: int, fire_at: dt.datetime, label: str,
               bell: str) -> dict:
     """統一 bot 守（2026-09-25 用戶決定）：計時/計時到/鬧鐘全部入排程，
@@ -2802,18 +2799,15 @@ def _execute(p: Parsed, now: dt.datetime, chat_id: int = 0) -> str:
             return f"⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響{tail}"
         # 2026-09-27 用戶決定：計時/鬧鐘直接落手機時鐘 app——系統級排程，
         # 深度睡眠／Termux 凍結都準時，唔再靠 bot 瞓等。
-        info = ""
-        if p.seconds <= _PHONE_TIMER_MAX:
-            ok, info = run_intent(timer_intent_cmd(p.seconds, p.label))
-            if ok:
-                return (f"⏱ 已落手機時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
-                        "——app 自己倒數自己響（深度睡眠都準時；取消喺時鐘 app）")
+        # 手機計時器上限 99999 小時（用戶證實）＝MAX_TIMER_SECONDS，冇需另設 cap。
+        ok, info = run_intent(timer_intent_cmd(p.seconds, p.label))
+        if ok:
+            return (f"⏱ 已落手機時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
+                    "——app 自己倒數自己響（深度睡眠都準時；取消喺時鐘 app）")
         job = _add_bell(chat_id, p.fire_at, p.label, "timer")
-        note = ("（超過手機計時器上限 99小時59分——bot 排程守）"
-                if p.seconds > _PHONE_TIMER_MAX
-                else f"（時鐘 app 設唔到：{info[:60]}——bot 排程守返）")
         return (f"⏱ 計時器 {fmt_duration(p.seconds)}{tag} → {when} 響"
-                f"（#{job['id']}，「取消 {job['id']}」可刪）{note}{tail}")
+                f"（#{job['id']}，「取消 {job['id']}」可刪）"
+                f"（時鐘 app 設唔到：{info[:60]}——bot 排程守返）{tail}")
     if DRY_RUN:
         return f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}{tail}"
     ok, info = run_intent(alarm_intent_cmd(p.hour, p.minute, p.label))
