@@ -57,6 +57,8 @@ log = logging.getLogger("tgalarm")
 # ---------------- 設定（環境變數 > 設定檔） ----------------
 CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/config"))
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
+TAKEAWAY_PATH = os.path.expanduser(
+    os.environ.get("TGALARM_TAKEAWAY", "~/.tgalarm/takeaway.json"))
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
 DESTINATIONS_PATH = os.path.expanduser(os.environ.get("TGALARM_DESTINATIONS", "~/.tgalarm/destinations.json"))
 TODO_PATH = os.path.expanduser(os.environ.get("TGALARM_TODO", "~/.tgalarm/todo.json"))
@@ -120,6 +122,7 @@ HELP = (
     "・計時 25分鐘　・計時 1天12小時　・計時 90秒\n"
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
+    "・外賣模式：打「外賣」開——所有計時提早 5 分鐘響；「外賣結束」收工\n"
     "⏰ 鬧鐘（直接落手機時鐘 app，系統自己響）：\n"
     "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身\n"
     "・連環鬧：鬧鐘 0900-1700 每60分鐘 轉位；過午夜都得（2100-0000 報更）；可拆兩行寫；頭加「每日」＝日日\n"
@@ -673,6 +676,9 @@ def _load_json(path, default):
         return default
 
 
+_TAKEAWAY = {"on": False}      # _load_json 定義後即刻載入（見下）
+
+
 def _save_json(path, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
@@ -683,6 +689,31 @@ def _save_json(path, data) -> None:
 
 def _is_yt_url(s: str) -> bool:
     return bool(re.match(r"https?://(www\.|m\.|music\.)?(youtube\.com|youtu\.be)/", s, re.IGNORECASE))
+
+_TAKEAWAY = _load_json(TAKEAWAY_PATH, {"on": False})
+
+
+def _takeaway_set(on: bool) -> None:
+    _TAKEAWAY["on"] = on
+    _save_json(TAKEAWAY_PATH, _TAKEAWAY)
+
+
+def _takeaway_handle(t: str):
+    """外賣模式開關（2026-09-27 用戶加）：開咗之後所有計時提早 5 分鐘響，
+    直到「外賣結束」。回傳回覆文字；None=唔關事。"""
+    if t in ("外賣", "外賣開", "叫外賣", "外賣模式"):
+        if _TAKEAWAY.get("on"):
+            return "🛵 外賣模式開緊——計時照樣提早 5 分鐘響。「外賣結束」收工。"
+        _takeaway_set(True)
+        return ("🛵 外賣模式開！由而家起所有「計時／計時到」自動提早 5 分鐘響"
+                "（例：25分鐘→20分鐘）。攞完嘢打「外賣結束」還原。")
+    if t in ("外賣結束", "收外賣", "唔叫外賣"):
+        if not _TAKEAWAY.get("on"):
+            return "本來就冇開外賣模式。"
+        _takeaway_set(False)
+        return "✅ 外賣模式收工——計時還原，唔再提早響。"
+    return None
+
 
 
 def _playlists() -> dict:
@@ -1745,9 +1776,14 @@ def _fmt_job_content(j: dict) -> str:
 
 def _fmt_jobs(now: dt.datetime) -> str:
     jobs = _jobs()
+    tw = ("\n🛵 外賣模式生效——計時提早 5 分鐘響（「外賣結束」收工）"
+          if _TAKEAWAY.get("on") else "")
     if not jobs:
-        return "🗓 冇排程。例：每日 0700 播 lofi・2130 播・每日 0900 計時 25分鐘・每日 0800 導航 公司"
+        return ("🗓 冇排程。例：每日 0700 播 lofi・2130 播・"
+                "每日 0900 計時 25分鐘・每日 0800 導航 公司" + tw)
     lines = ["🗓 排程："]
+    if _TAKEAWAY.get("on"):
+        lines.append("🛵 外賣模式生效——計時提早 5 分鐘響（「外賣結束」收工）")
     for j in jobs:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
@@ -2793,19 +2829,28 @@ def _execute(p: Parsed, now: dt.datetime, chat_id: int = 0) -> str:
     if p.kind == "timer":
         if p.seconds > MAX_TIMER_SECONDS:
             return f"⚠️ 超過計時上限 99999 小時（你設咗 {fmt_duration(p.seconds)}），冇設定到"
+        adj = ""
+        if _TAKEAWAY.get("on"):
+            cut = min(300, max(0, p.seconds - 60))   # 至少留 1 分鐘
+            if cut > 0:
+                old_s = p.seconds
+                p.seconds -= cut
+                p.fire_at -= dt.timedelta(seconds=cut)
+                adj = (f"🛵 外賣模式：{fmt_duration(old_s)} → "
+                       f"{fmt_duration(p.seconds)}（提早響）\n")
         day = day_label(p.fire_at, now)
         when = f"{p.fire_at:%H:%M}" if day == "今日" else f"{day} {p.fire_at:%H:%M}"
         if DRY_RUN:
-            return f"⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響{tail}"
+            return f"{adj}⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響{tail}"
         # 2026-09-27 用戶決定：計時/鬧鐘直接落手機時鐘 app——系統級排程，
         # 深度睡眠／Termux 凍結都準時，唔再靠 bot 瞓等。
         # 手機計時器上限 99999 小時（用戶證實）＝MAX_TIMER_SECONDS，冇需另設 cap。
         ok, info = run_intent(timer_intent_cmd(p.seconds, p.label))
         if ok:
-            return (f"⏱ 已落手機時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
-                    "——app 自己倒數自己響（深度睡眠都準時；取消喺時鐘 app）")
+            return (f"{adj}⏱ 已落手機時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
+                    f"——{when} 響（app 自己倒數；深度睡眠都準時；取消喺時鐘 app）")
         job = _add_bell(chat_id, p.fire_at, p.label, "timer")
-        return (f"⏱ 計時器 {fmt_duration(p.seconds)}{tag} → {when} 響"
+        return (f"{adj}⏱ 計時器 {fmt_duration(p.seconds)}{tag} → {when} 響"
                 f"（#{job['id']}，「取消 {job['id']}」可刪）"
                 f"（時鐘 app 設唔到：{info[:60]}——bot 排程守返）{tail}")
     if DRY_RUN:
@@ -2873,6 +2918,10 @@ async def _on_message(update, context):
         return
     if t.startswith("時間 ") or t == "時間":
         await update.message.reply_text(_time_reply(t[2:].strip()))
+        return
+    _tw = _takeaway_handle(t)
+    if _tw is not None:
+        await update.message.reply_text(_tw)
         return
     _lcid = update.effective_chat.id if getattr(update, "effective_chat", None) else None
     if (_lcid and _LIAR_GAMES.get(_lcid)) or t.startswith("大話"):

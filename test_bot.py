@@ -406,6 +406,74 @@ class TestTimerCap(unittest.TestCase):
         self.assertIn("#1", r)
         self.assertIn("設唔到", r)
 
+    def test_takeaway_toggle_and_timer_minus5(self):
+        old_save = bot._save_json
+        bot._save_json = lambda p, d: None
+        bot._TAKEAWAY["on"] = False
+        seen = {}
+        def fake(cmd):
+            seen["cmd"] = " ".join(cmd)
+            return True, "OK"
+        oi = bot.run_intent
+        bot.run_intent = fake
+        try:
+            self.assertIn("開", bot._takeaway_handle("外賣"))
+            self.assertIn("開緊", bot._takeaway_handle("外賣"))
+            r = _execute(parse_command("計時 25分鐘", NOW), NOW, chat_id=1)
+            self.assertIn("外賣模式：25分鐘 → 20分鐘", r)
+            self.assertIn("1200", seen["cmd"])
+            self.assertIn("收工", bot._takeaway_handle("外賣結束"))
+            self.assertIn("冇開", bot._takeaway_handle("外賣結束"))
+            r2 = _execute(parse_command("計時 25分鐘", NOW), NOW, chat_id=1)
+            self.assertNotIn("外賣模式", r2)
+            self.assertIn("1500", seen["cmd"])
+            self.assertIn("15:25", r2)           # 還原：25分鐘→15:25 響
+        finally:
+            bot.run_intent = oi
+            bot._save_json = old_save
+            bot._TAKEAWAY["on"] = False
+
+    def test_takeaway_target_timer_and_clamp_and_alarm(self):
+        old_save = bot._save_json
+        bot._save_json = lambda p, d: None
+        bot._TAKEAWAY["on"] = False
+        seen = {}
+        def fake(cmd):
+            seen["cmd"] = " ".join(cmd)
+            return True, "OK"
+        oi = bot.run_intent
+        bot.run_intent = fake
+        try:
+            bot._takeaway_set(True)
+            # 計時到 18:30（NOW 15:00）→ 提早 5 分鐘：18:25 響
+            r = _execute(parse_command("計時到 18:30", NOW), NOW, chat_id=1)
+            self.assertIn("18:25", r)
+            self.assertIn(str(12600 - 300), seen["cmd"])
+            # 短計時：至少留 1 分鐘
+            r2 = _execute(parse_command("計時 2分鐘", NOW), NOW, chat_id=1)
+            self.assertIn("2分鐘 → 1分鐘", r2)
+            self.assertIn("60", seen["cmd"])
+            # 鬧鐘唔受影響
+            r3 = _execute(parse_command("鬧鐘 0700", NOW), NOW, chat_id=1)
+            self.assertNotIn("外賣模式", r3)
+            self.assertIn("SET_ALARM", seen["cmd"])
+        finally:
+            bot.run_intent = oi
+            bot._save_json = old_save
+            bot._TAKEAWAY["on"] = False
+
+    def test_takeaway_jobs_line(self):
+        old_jobs, old_save = bot._jobs, bot._save_json
+        bot._jobs = lambda: []
+        bot._save_json = lambda p, d: None
+        try:
+            bot._TAKEAWAY["on"] = True
+            self.assertIn("外賣模式", bot._fmt_jobs(NOW))
+            bot._TAKEAWAY["on"] = False
+            self.assertNotIn("外賣模式", bot._fmt_jobs(NOW))
+        finally:
+            bot._jobs, bot._save_json = old_jobs, old_save
+
     def test_timer_intent_fail_falls_back_to_bell(self):
         old = bot.run_intent
         bot.run_intent = lambda cmd: (False, "boom")
