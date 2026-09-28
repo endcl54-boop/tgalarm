@@ -3523,7 +3523,67 @@ class TestFiveFeatures(unittest.TestCase):
         self.assertIn("每30分 飲水", r)
 
 
-class TestWaitWall(unittest.TestCase):
+class TestSeriesWindow(unittest.TestCase):
+    """連環鬧窗口：尾響要完場（window_end 缺失都唔可以錨錯日多響）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        self._si, self._ss = bot.run_intent, bot._send_safe
+        self._arm = bot._arm
+        bot._arm = lambda j: None
+        bot.run_intent = lambda cmd: (True, "OK")
+
+        async def fs(cid, msg, tag=""):
+            pass
+        bot._send_safe = fs
+
+    def tearDown(self):
+        bot.JOBS_PATH = self._oj
+        bot.run_intent, bot._send_safe = self._si, self._ss
+        bot._arm = self._arm
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _mk(self, daily, next_iso):
+        return {"id": 8, "type": "series", "hh": 20, "mm": 15,
+                "end_hh": 7, "end_mm": 15, "daily": daily, "every": 3600,
+                "label": "水樽，筆", "chat_id": 1, "next": next_iso,
+                "seconds": 0, "url": "", "shuffle": False, "paused": False}
+
+    def test_final_ring_ends_series_even_without_window_end(self):
+        """2026-09-28 實證 bug：尾響 07:15 window_end 缺失→錨去聽日→08:15 繼續響。"""
+        now = dt.datetime.now()
+        f0715 = now.replace(hour=7, minute=15, second=0, microsecond=0)
+        json.dump([self._mk(False, f0715.isoformat())],
+                  open(bot.JOBS_PATH, "w"))
+        asyncio.run(bot._fire_later(self._mk(False, f0715.isoformat()), 0))
+        self.assertEqual([j for j in bot._jobs() if j["id"] == 8], [])  # 完場
+
+    def test_daily_final_ring_reschedules_tomorrow_start(self):
+        now = dt.datetime.now()
+        f0715 = now.replace(hour=7, minute=15, second=0, microsecond=0)
+        json.dump([self._mk(True, f0715.isoformat())],
+                  open(bot.JOBS_PATH, "w"))
+        asyncio.run(bot._fire_later(self._mk(True, f0715.isoformat()), 0))
+        j = bot._jobs()[0]
+        self.assertEqual(j["next"][11:16], "20:15")
+        self.assertNotEqual(j["next"][:10], f0715.date().isoformat())
+        self.assertIsNone(j.get("window_end"))
+
+    def test_midseries_missing_window_end_reanchors_backwards(self):
+        now = dt.datetime.now()
+        mid = (now.replace(hour=21, minute=15, second=0, microsecond=0)
+               - dt.timedelta(days=1))
+        json.dump([self._mk(True, mid.isoformat())],
+                  open(bot.JOBS_PATH, "w"))
+        asyncio.run(bot._fire_later(self._mk(True, mid.isoformat()), 0))
+        j = bot._jobs()[0]
+        self.assertEqual(j["next"][11:16], "22:15")
+        self.assertEqual(j["window_end"][11:16], "07:15")   # 錨返昨晚20:15起
+
+
+class TestJsonHeal(unittest.TestCase):
     """牆鐘分段等：deep sleep（monotonic 凍結）都唔會拖遲排程。"""
 
     def test_basic_past_and_future(self):

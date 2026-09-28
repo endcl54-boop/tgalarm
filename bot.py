@@ -2208,10 +2208,16 @@ async def _fire_later(job: dict, delay: float) -> None:
         if we:
             end_dt = dt.datetime.fromisoformat(we)
         else:
+            # 錨點＝呢一輪 series 嘅起點（向前搵最近一次 hh:mm），
+            # 唔可以用 fire_dt 直接管——尾響（跨午夜後）會錨去聽日（2026-09-28 實證：
+            # #8 20:15–07:15 尾響 07:15 之後錨咗去聽日，多響成日）
             span = dt.timedelta(minutes=((job["end_hh"] * 60 + job["end_mm"])
                                          - (job["hh"] * 60 + job["mm"])) % 1440)
-            end_dt = (fire_dt.replace(hour=job["hh"], minute=job["mm"],
-                                      second=0, microsecond=0) + span)
+            start_dt = fire_dt.replace(hour=job["hh"], minute=job["mm"],
+                                       second=0, microsecond=0)
+            if start_dt > fire_dt:
+                start_dt -= dt.timedelta(days=1)
+            end_dt = start_dt + span
             job["window_end"] = end_dt.isoformat()
         if nxt <= end_dt:
             new_next = nxt
@@ -2227,6 +2233,11 @@ async def _fire_later(job: dict, delay: float) -> None:
             for j in jobs:
                 if j["id"] == job["id"]:
                     j["next"] = job["next"]
+                    we2 = job.get("window_end")
+                    if we2:
+                        j["window_end"] = we2      # 要 persist，唔係淨同步 next
+                    else:
+                        j.pop("window_end", None)
             _save_json(JOBS_PATH, jobs)
             _TASKS.pop(job["id"], None)
             _arm(job)
