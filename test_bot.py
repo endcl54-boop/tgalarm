@@ -3839,3 +3839,112 @@ class TestTimerLabelCollision(unittest.TestCase):
         p = bot.parse_command("計時 0925 1830", now)
         self.assertEqual(p.fire_at.date(), dt.date(2027, 9, 25))  # 真日期照舊
         self.assertIsNone(bot.parse_command("計時 0931 1830", now))  # 打錯照拒
+
+
+
+class TestTTS(unittest.TestCase):
+    """通知語音化：termux-tts-speak 廣東話讀出下一個任務（連機都唔使睇）。"""
+
+    def test_scrub_and_cjk_when(self):
+        self.assertEqual(bot._speech_scrub("🌤 今日 32度☀️【好熱】(注意)"),
+                         "今日 32度 好熱 注意")
+        now = dt.datetime(2026, 9, 29, 13, 30)
+        self.assertEqual(
+            bot._cjk_when(dt.datetime(2026, 9, 29, 7, 32), now),
+            "今日朝早7點32分")
+        self.assertEqual(
+            bot._cjk_when(dt.datetime(2026, 9, 29, 18, 0), now),
+            "今日下晝6點正")
+        self.assertEqual(
+            bot._cjk_when(dt.datetime(2026, 9, 30, 7, 5), now),
+            "聽日朝早7點零5分")
+        self.assertEqual(
+            bot._cjk_when(dt.datetime(2026, 9, 29, 0, 30), now),
+            "今日凌晨12點30分")
+
+    def test_say_uses_termux_tts(self):
+        calls = []
+
+        class FakeCP:
+            returncode = 0
+
+        def fake_run(args, timeout=None):
+            calls.append(args)
+            return FakeCP()
+        old_run = bot.subprocess.run
+        bot.subprocess.run = fake_run
+        try:
+            asyncio.run(bot._say("測試一句"))
+            self.assertTrue(calls)
+            self.assertEqual(calls[0][0], "termux-tts-speak")
+            self.assertIn("測試一句", calls[0])
+        finally:
+            bot.subprocess.run = old_run
+
+    def test_next_task_line(self):
+        tmp = tempfile.mkdtemp()
+        old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        try:
+            now = dt.datetime(2026, 9, 29, 13, 30)
+            jobs = [
+                {"id": 1, "type": "nav", "label": "屋企",
+                 "next": "2026-09-29T18:20:00", "paused": False,
+                 "hh": 18, "mm": 20, "daily": True, "url": "x",
+                 "seconds": 0, "mode": "d", "shuffle": False},
+                {"id": 2, "type": "web", "label": "記帳",
+                 "next": "2026-09-29T19:33:00", "paused": False,
+                 "hh": 19, "mm": 33, "daily": True, "url": "x",
+                 "seconds": 0, "shuffle": False},
+                {"id": 3, "type": "play", "label": "lofi",
+                 "next": "2026-09-29T14:00:00", "paused": True,
+                 "hh": 14, "mm": 0, "daily": False, "url": "y",
+                 "seconds": 0, "shuffle": False},
+                {"id": 4, "type": "focus", "label": "",
+                 "next": "2026-09-29T13:40:00", "paused": False,
+                 "hh": 13, "mm": 40, "daily": False,
+                 "session_start": "2026-09-29T13:30:00",
+                 "wmin": 25, "bmin": 5},
+            ]
+            with open(bot.JOBS_PATH, "w", encoding="utf-8") as f:
+                json.dump(jobs, f, ensure_ascii=False)
+            line = bot._next_task_line(now)
+            self.assertIn("今日下晝6點20分", line)
+            self.assertIn("屋企", line)     # paused／focus 排除後最早嗰個
+        finally:
+            bot.JOBS_PATH = old_j
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_alloc_fire_speaks_segment(self):
+        tmp = tempfile.mkdtemp()
+        old_j, old_ri = bot.JOBS_PATH, bot.run_intent
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        bot.run_intent = lambda cmd: (True, "OK")
+        said = []
+
+        async def fs(cid, msg, tag=""):
+            pass
+
+        async def fake_say(txt):
+            said.append(txt)
+        old_ss, old_say = bot._send_safe, bot._say
+        bot._send_safe = fs
+        bot._say = fake_say
+        try:
+            alloc = {"id": 5, "type": "alloc", "label": "分配",
+                     "daily": True, "hh": 16, "mm": 0, "idx": 0, "_rem": 0,
+                     "segments": [{"text": "沖涼", "seconds": 1800},
+                                  {"text": "食飯", "seconds": 3600}],
+                     "next": "2026-09-29T16:00:00", "chat_id": 1,
+                     "seconds": 0, "url": "", "shuffle": False,
+                     "paused": False}
+            with open(bot.JOBS_PATH, "w", encoding="utf-8") as f:
+                json.dump([alloc], f, ensure_ascii=False)
+            asyncio.run(bot._fire_later(dict(alloc), 0))
+            self.assertTrue(said)
+            self.assertIn("第1項", said[0])
+            self.assertIn("沖涼", said[0])
+        finally:
+            bot.JOBS_PATH, bot.run_intent = old_j, old_ri
+            bot._send_safe, bot._say = old_ss, old_say
+            shutil.rmtree(tmp, ignore_errors=True)

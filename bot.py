@@ -152,7 +152,7 @@ HELP = (
     "🧩 時間分配（到點自動連環計時）：\n"
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
-    "🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
+    "🔊 語音：下一個（讀出下個任務）・講 [文字]（廣東話 TTS）\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
@@ -2306,6 +2306,8 @@ async def _fire_later(job: dict, delay: float) -> None:
         wok, report = await asyncio.to_thread(_weather_report)
         msg = ("🌤 " + report) if wok else f"❌ 天氣攞唔到：{report[:120]}"
         await _send_safe(job["chat_id"], msg, "天氣簡報")
+        if wok:
+            await _say(_speech_scrub(report)[:140])
         if job.get("daily"):
             job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
             jobs = _jobs()
@@ -2333,6 +2335,7 @@ async def _fire_later(job: dict, delay: float) -> None:
             # TG 掣制確認係主路（彈窗已停用：Telegram 前景會攔截佢）
             ok, info = True, "TG 掣確認"
             how = f"開導航去「{label}」——撳 TG 掣「🗺 開地圖」先會開"
+            await _say(f"開導航去{_speech_scrub(label)}")
 
             async def _nav_late(job=job):
                 await asyncio.sleep(5)     # 掣後聲音提示
@@ -2704,6 +2707,8 @@ async def _fire_alloc(job: dict) -> None:
         text = f"❌ 開唔到計時器「{seg['text']}」：{str(info)[:120]}" + (
             _BAL_TIP if _is_bal_denied(info) else "")
     await _send_safe(job["chat_id"], text, "分配到點訊息")
+    await _say(f"第{idx + 1}項，{_speech_scrub(seg['text'])}，"
+               f"{fmt_duration(secs)}")
     fired_at = dt.datetime.fromisoformat(job["next"])
     keep = True
     if idx + 1 < len(segs):
@@ -3500,6 +3505,17 @@ async def _on_message(update, context):
     if _gp is not None:
         await update.message.reply_text(_gp)
         return
+    if t in ("下一個", "下一個任務", "next"):
+        line = _next_task_line()
+        await _say(line)
+        await update.message.reply_text("🔊 " + line)
+        return
+    m = re.fullmatch(r"(?:講|讀|tts)\s+(.+)", t, re.IGNORECASE)
+    if m:
+        said = _speech_scrub(m.group(1))
+        await _say(said)
+        await update.message.reply_text(f"🔊 讀咗：{said[:60]}")
+        return
     for _h in (_nag_handle, _focus_handle, _battery_handle):
         _hr = _h(t, _cid0)
         if _hr is not None:
@@ -3562,6 +3578,70 @@ def _hold_wake_lock() -> bool:
 
 
 _LOCK_FH = None   # singleton lock file handle——揸到 process 死，核心自動解鎖
+
+
+_SPEECH_JUNK = re.compile(r"[^\w\s，。、：；！？%度分鐘點]")
+
+
+def _speech_scrub(text: str) -> str:
+    """剷走 emoji／符號／markdown，淨返 TTS 讀得順嘅字。"""
+    text = re.sub(r"[\U00010000-\U0010FFFF]|[\u2600-\u27BF]"
+                  r"|\[[^\]]*\]|[「」『』（）【】*`_#>/\\]", "", str(text))
+    text = _SPEECH_JUNK.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _cjk_when(x: dt.datetime, now: dt.datetime | None = None) -> str:
+    """時間→廣東話讀法：聽日朝早7點32分／今日下晝6點正。"""
+    now = now or dt.datetime.now()
+    d = (x.date() - now.date()).days
+    if d == 0:
+        day = "今日"
+    elif d == 1:
+        day = "聽日"
+    elif d == 2:
+        day = "後日"
+    else:
+        return f"{x.month}月{x.day}日"
+    h = x.hour
+    part = ("朝早" if 5 <= h < 11 else "中午" if 11 <= h < 13
+            else "下晝" if 13 <= h < 19 else "夜晚" if 19 <= h < 23
+            else "凌晨")
+    h12 = h % 12 or 12
+    mm = x.minute
+    minute_txt = "正" if mm == 0 else (f"零{mm}分" if mm < 10 else f"{mm}分")
+    return f"{day}{part}{h12}點{minute_txt}"
+
+
+def _next_task_line(now: dt.datetime | None = None) -> str:
+    """下一個排緊嘅任務（focus 進行中唔計）→ 一句廣東話。"""
+    now = now or dt.datetime.now()
+    cand = []
+    for j in _jobs():
+        if j.get("paused") or j.get("type") == "focus" or not j.get("next"):
+            continue
+        try:
+            cand.append((dt.datetime.fromisoformat(j["next"]), j))
+        except ValueError:
+            continue
+    if not cand:
+        return "而家冇排緊任何任務。"
+    nxt, job = min(cand, key=lambda p: p[0])
+    content = _speech_scrub(_fmt_job_content(job)) or "任務"
+    return f"{_cjk_when(nxt, now)}，{content}"
+
+
+async def _say(text: str) -> None:
+    """termux-tts-speak（Termux:API）廣東話讀出——失敗靜靜記 log 唔阻任務。"""
+    text = (text or "").strip()
+    if not text:
+        return
+    try:
+        await asyncio.to_thread(
+            subprocess.run, ["termux-tts-speak", "--rate", "0.9", text],
+            timeout=30)
+    except Exception as exc:
+        log.warning("TTS 失敗：%s", str(exc)[:80])
 
 
 def _acquire_singleton(path: str | None = None) -> bool:
