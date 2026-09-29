@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import fcntl
 import json
 import logging
 import random
@@ -57,6 +58,7 @@ log = logging.getLogger("tgalarm")
 # ---------------- 設定（環境變數 > 設定檔） ----------------
 CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/config"))
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
+LOCK_PATH = os.path.expanduser(os.environ.get("TGALARM_LOCK", "~/.tgalarm/bot.lock"))
 TAKEAWAY_PATH = os.path.expanduser(
     os.environ.get("TGALARM_TAKEAWAY", "~/.tgalarm/takeaway.json"))
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
@@ -3496,7 +3498,36 @@ def _hold_wake_lock() -> bool:
         return False
 
 
+_LOCK_FH = None   # singleton lock file handle——揸到 process 死，核心自動解鎖
+
+
+def _acquire_singleton(path: str | None = None) -> bool:
+    """單例鎖（flock）：第二條 instance 即刻退出。
+
+    實例倍增（bashrc hook／boot／shortcut／restart 重疊）會令兩條
+    getUpdates 互搶 updates——409 Conflict 之外仲會令訊息調轉序處理
+    （「專注結束」先行、「專注 25」後到＝鬼計時器——2026-09-29 12:38
+    用戶實證）。"""
+    p = path or LOCK_PATH
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    f = open(p, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    global _LOCK_FH
+    _LOCK_FH = f
+    f.seek(0)
+    f.write(str(os.getpid()))
+    f.truncate()
+    return True
+
+
 def main():
+    if not _acquire_singleton():
+        log.info("已有 bot instance 行緊（singleton lock）——呢條即刻退出")
+        return
     if not BOT_TOKEN:
         sys.exit(
             "未設定 BOT_TOKEN。\n"

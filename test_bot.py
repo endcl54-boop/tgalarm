@@ -3735,3 +3735,20 @@ class TestJsonHeal(unittest.TestCase):
             self.assertLess(used, 5.0, f"牆鐘跳前應即刻追上，實際用咗 {used:.1f}s")
         finally:
             bot.dt = orig_dt
+
+
+
+class TestSingletonLock(unittest.TestCase):
+    """單例鎖：第二條 instance（hook/boot/restart 重疊）即刻退出——
+    防 getUpdates 互搶令訊息調轉序（專注結束先行＝鬼計時器）。"""
+
+    def test_second_instance_exits(self):
+        tmp = tempfile.mkdtemp()
+        lp = os.path.join(tmp, "bot.lock")
+        try:
+            self.assertTrue(bot._acquire_singleton(lp))
+            self.assertFalse(bot._acquire_singleton(lp))   # 同 process 第二攞
+            self.assertTrue(os.path.exists(lp))
+        finally:
+            bot._LOCK_FH = None
+            shutil.rmtree(tmp, ignore_errors=True)
