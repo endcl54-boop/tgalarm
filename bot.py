@@ -290,10 +290,18 @@ def _read_datetime_target(rest: str, now: dt.datetime):
         r = _read_hhmm(rest[m.end():])
         if r:  # 後面跟住時間先當 mmdd；冇就留返畀 hhmm 規則（如「計時 1230」= 12:30）
             hh, mm, label = r
-            month, day = int(m.group(1)[:2]), int(m.group(1)[2:])
+            tok = m.group(1)
+            month, day = int(tok[:2]), int(tok[2:])
             try:
                 target = dt.datetime(now.year, month, day, hh, mm)
             except ValueError:
+                # 4位數標籤/單號撞 mmdd 語法（例「計時 1530 1727」——15唔係月份，
+                # 2026-09-29 用戶實證）：首 token 根本唔可能係日期（月>12/日>31）
+                # 就當 hhmm＋後面全做標籤；似日期但打錯（如 0931）照拒絕
+                if ((month > 12 or day > 31)
+                        and int(tok[:2]) <= 23 and int(tok[2:]) <= 59):
+                    t2 = _next_occurrence(now, int(tok[:2]), int(tok[2:]))
+                    return t2, rest[m.end():].strip()
                 return None  # 日期唔存在（如 0931），明確拒絕，唔好亂估
             while target <= now:
                 try:

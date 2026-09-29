@@ -3826,3 +3826,22 @@ class TestDailyAlarm(unittest.TestCase):
             bot.JOBS_PATH = old_j
             bot._arm, bot.run_intent, bot._send_safe = old_arm, old_ri, old_ss
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+class TestTimerLabelCollision(unittest.TestCase):
+    """「計時 1530 1727」——4位數標籤撞「MMDD HHMM」語法：首 token 唔可能
+    係日期（月>12/日>31）就當 hhmm＋標籤；真日期照 mmdd；打錯日期照拒。"""
+
+    def test_four_digit_label_fallback(self):
+        now = dt.datetime(2026, 9, 29, 13, 30)
+        p = bot.parse_command("計時 1530 1727", now)
+        self.assertIsNotNone(p)
+        self.assertEqual((p.fire_at.hour, p.fire_at.minute, p.fire_at.day),
+                         (15, 30, 29))
+        self.assertEqual(p.label, "1727")
+        p = bot.parse_command("計時 1530 單號1727", now)
+        self.assertEqual(p.label, "單號1727")
+        p = bot.parse_command("計時 0925 1830", now)
+        self.assertEqual(p.fire_at.date(), dt.date(2027, 9, 25))  # 真日期照舊
+        self.assertIsNone(bot.parse_command("計時 0931 1830", now))  # 打錯照拒
