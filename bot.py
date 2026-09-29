@@ -3669,8 +3669,14 @@ async def _say(text: str) -> None:
     text = (text or "").strip()
     if not text:
         return
-    # vivo 會背景清理 Termux:API——凍啟動＋引擎暖機可以超過 30 秒
-    # （2026-09-29 17:46 用戶實證四連 timeout，暖機後秒應）→ 90 秒＋重試一次
+    # vivo 會背景清理 Termux:API——凍啟動第一下會吊住（2026-09-29 實證）。
+    # 預熱：先發個平價 API call 拉醒 termux-api process（生時 1-2 秒）
+    try:
+        await asyncio.to_thread(subprocess.run, ["termux-battery-status"],
+                                timeout=12)
+    except Exception:
+        pass                                  # 拉唔醒都照講（底下行 retry）
+    # 凍啟動＋引擎暖機可以超過 30 秒 → 90 秒＋重試一次
     for attempt in (1, 2):
         try:
             await asyncio.to_thread(
