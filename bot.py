@@ -2496,12 +2496,20 @@ async def _fire_later(job: dict, delay: float) -> None:
         _arm(job)
         return
     elif jtype == "seal":
-        # 封印巡邏：25 秒一次前景偵測；命中→force-stop（死路→HOME）＋旁白
+        # 封印：到期（until 當日全日有效，翌日 00:00 過氣）→ pm enable 復活；
+        # 淨巡邏貨先做 25 秒前景偵測（停用咗嘅唔使理）
         active = [x for x in job.get("apps", [])
                   if x["until"] >= now.date().isoformat()]
         expired = [x for x in job.get("apps", [])
                    if x["until"] < now.date().isoformat()]
         if expired:
+            for x in expired:
+                if x.get("mode") == "disabled":
+                    oke, oute = _shell_priv_exec(
+                        f"pm enable --user 0 {x['pkg']}")
+                    if not oke:
+                        log.warning("解封 pm enable 失敗：%s %s",
+                                    x["pkg"], str(oute)[:60])
             await _send_safe(job["chat_id"],
                              "🔓 到期解封：" + "、".join(x["label"] for x in expired),
                              "封印")
@@ -2510,21 +2518,29 @@ async def _fire_later(job: dict, delay: float) -> None:
             _TASKS.pop(job["id"], None)
             _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
             return
-        fg = await asyncio.to_thread(_fg_pkg)
-        hit = next((x for x in active if fg and x["pkg"] == fg), None)
-        if hit:
-            ok2, _ = await asyncio.to_thread(
-                _shell_priv_exec, f"am force-stop {hit['pkg']}")
-            if not ok2:
-                await asyncio.to_thread(
-                    _shell_priv_exec, "input keyevent KEYCODE_HOME")
-            log.info("封印命中：%s（force-stop=%s）", hit["pkg"], ok2)
-            await _send_safe(job["chat_id"],
-                             f"🔒 封印緊「{hit['label']}」（到 {hit['until']}）"
-                             "——專注返正嘢",
-                             "封印")
-            await _say("封印緊，專注返正嘢")
-        job["next"] = (now + dt.timedelta(seconds=25)).isoformat()
+        patrol = [x for x in active if x.get("mode", "patrol") == "patrol"]
+        if patrol:
+            fg = await asyncio.to_thread(_fg_pkg)
+            hit = next((x for x in patrol if fg and x["pkg"] == fg), None)
+            if hit:
+                ok2, _ = await asyncio.to_thread(
+                    _shell_priv_exec, f"am force-stop {hit['pkg']}")
+                if not ok2:
+                    await asyncio.to_thread(
+                        _shell_priv_exec, "input keyevent KEYCODE_HOME")
+                log.info("封印命中：%s（force-stop=%s）", hit["pkg"], ok2)
+                await _send_safe(job["chat_id"],
+                                 f"🔒 封印緊「{hit['label']}」（到 {hit['until']}）"
+                                 "——專注返正嘢",
+                                 "封印")
+                await _say("封印緊，專注返正嘢")
+            job["next"] = (now + dt.timedelta(seconds=25)).isoformat()
+        else:
+            # 全部停用咗：唔使巡，等到期翌日 00:01 解封
+            nxt_date = min(dt.date.fromisoformat(x["until"])
+                           for x in active) + dt.timedelta(days=1)
+            job["next"] = dt.datetime.combine(nxt_date,
+                                              dt.time(0, 1)).isoformat()
         jobs = _jobs()
         for j in jobs:
             if j["id"] == job["id"]:
@@ -3432,7 +3448,8 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         lines = ["🔒 封印中"]
         for j in js:
             for ap in j.get("apps", []):
-                lines.append(f"・{ap['label']} → {ap['until']}"
+                badge = ("⛔" if ap.get("mode") == "disabled" else "👁")
+                lines.append(f"・{badge} {ap['label']} → {ap['until']}"
                              f"{'（已過期）' if ap['until'] < now.date().isoformat() else ''}")
         lines.append("（解封 [名] 提早開放；解封 全部）")
         return "\n".join(lines)
@@ -3451,20 +3468,33 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         for kw in kws:
             pkgs = _pkg_search(kw)
             for p in pkgs:
-                found.append({"pkg": p, "label": p, "until": until.isoformat()})
+                # 停用（disable-user）＝真封印：圖示灰、點入開唔到，唔使巡邏；
+                # pm 唔行（lane 死）先退 25 秒巡邏 force-stop 模式
+                okd, _ = _shell_priv_exec(f"pm disable-user --user 0 {p}")
+                found.append({"pkg": p, "label": p,
+                              "until": until.isoformat(),
+                              "mode": "disabled" if okd else "patrol"})
                 if kw in missing:
                     missing.remove(kw)
         if not found:
             return f"❓ 搾唔到 {cmd.ref} 呢個 app——試埋全名（pm list 嘅 package 字眼）"
         job = next((j for j in _seal_jobs()), None)
+        patrol_n = sum(1 for f in found if f["mode"] == "patrol")
+        nxt = (now if patrol_n else
+               dt.datetime.combine(until + dt.timedelta(days=1),
+                                   dt.time(0, 1))).isoformat()
         if job:
             jobs = _jobs()
+            merged = found + [x for x in job.get("apps", [])
+                              if x["pkg"] not in {f["pkg"] for f in found}]
+            patrol_n = sum(1 for f in merged if f.get("mode") == "patrol")
+            nxt = (now if patrol_n else
+                   dt.datetime.combine(until + dt.timedelta(days=1),
+                                       dt.time(0, 1))).isoformat()
             for j in jobs:
                 if j["id"] == job["id"]:
-                    j["apps"] = found + [x for x in j.get("apps", [])
-                                         if x["pkg"] not in
-                                         {f["pkg"] for f in found}]
-                    j["next"] = now.isoformat()
+                    j["apps"] = merged
+                    j["next"] = nxt
             _save_json(JOBS_PATH, jobs)
             _TASKS.pop(job["id"], None)
             _arm(job)
@@ -3472,12 +3502,16 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         else:
             nj = _add_simple_job(chat_id, {
                 "type": "seal", "apps": found, "chat_id": chat_id,
-                "hh": now.hour, "mm": now.minute, "next": now.isoformat(),
+                "hh": now.hour, "mm": now.minute, "next": nxt,
                 "label": "封印"})
             jid = nj["id"]
+        dis = sum(1 for f in found if f["mode"] == "disabled")
         msg = (f"🔒 封印生效（#{jid}）："
                + "、".join(f"{f['label']}→{f['until']}" for f in found)
-               + "\n一開就即刻閂＋讀你聽；提早開放 send「解封 " + kws[0] + "」")
+               + (f"\n⛔ {dis} 個已停用（圖示變灰、點入開唔到）" if dis else "")
+               + (f"\n👁 {patrol_n} 個巡邏中（pm 唔行，開即閂）"
+                  if patrol_n else "")
+               + "\n提早開放 send「解封 " + kws[0] + "」")
         if missing:
             msg += f"\n⚠️ 搾唔到：{('、'.join(missing))}"
         return msg
@@ -3491,6 +3525,12 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
             for ap in j.get("apps", []):
                 if not kws or any(k.lower() in ap["pkg"].lower() for k in kws):
                     removed.append(ap["label"])
+                    if ap.get("mode") == "disabled":
+                        oke, oute = _shell_priv_exec(
+                            f"pm enable --user 0 {ap['pkg']}")
+                        if not oke:
+                            log.warning("解封 pm enable 失敗：%s %s",
+                                        ap["pkg"], str(oute)[:60])
                 else:
                     left_apps.append(ap)
         if not removed:

@@ -4010,13 +4010,17 @@ class TestTimerBellSpeaks(unittest.TestCase):
 
 
 class TestSeal(unittest.TestCase):
-    """封印（衝動消費防線）：封印 za 到日期——開即閂＋旁白；到期自動解封。"""
+    """封印：停用（pm disable-user）優先，pm 死退 25 秒巡邏；到期自動復活。"""
 
-    def _mock_lane(self, fg_pkg=""):
+    def _mock_lane(self, disable_ok=True, fg_pkg=""):
         calls = []
 
         def fake_exec(cmd):
             calls.append(cmd)
+            if "disable-user" in cmd:
+                return (disable_ok, "")
+            if "pm enable" in cmd:
+                return (True, "")
             if "force-stop" in cmd:
                 return (True, "")
             if "grep" in cmd and fg_pkg:
@@ -4028,8 +4032,7 @@ class TestSeal(unittest.TestCase):
             return (True, "")
         return calls, fake_exec
 
-    def test_seal_lifecycle(self):
-        tmp = tempfile.mkdtemp()
+    def _setup(self, tmp):
         old_j, old_arm = bot.JOBS_PATH, bot._arm
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
         bot._arm = lambda j: None
@@ -4040,55 +4043,82 @@ class TestSeal(unittest.TestCase):
 
         async def fk(t, delay=0):
             said.append(t)
-        old_ss, old_say = bot._send_safe, bot._say
+        old_ss, old_say, old_exec = bot._send_safe, bot._say, \
+            bot._shell_priv_exec
         bot._send_safe = fs
         bot._say = fk
-        calls, fake_exec = self._mock_lane()
-        old_exec = bot._shell_priv_exec
+        return said, (old_j, old_arm, old_ss, old_say, old_exec)
+
+    def _teardown(self, olds, tmp):
+        old_j, old_arm, old_ss, old_say, old_exec = olds
+        bot.JOBS_PATH, bot._arm, bot._send_safe = old_j, old_arm, old_ss
+        bot._say, bot._shell_priv_exec = old_say, old_exec
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_disable_mode(self):
+        """pm 行：全停用——圖示灰、唔使巡、等到期翌日 00:01 復活。"""
+        tmp = tempfile.mkdtemp()
+        said, olds = self._setup(tmp)
+        calls, fake_exec = self._mock_lane(disable_ok=True)
         bot._shell_priv_exec = fake_exec
         try:
             now = dt.datetime.now()
             r = bot._execute_player(
                 bot.parse_player("封印 za 到 2030-01-01"), 1, now)
-            self.assertIn("封印生效", r)
+            self.assertIn("已停用", r)
+            self.assertNotIn("巡邏中", r)
             job = bot._jobs()[0]
-            self.assertEqual(job["type"], "seal")
-            self.assertEqual({a["pkg"] for a in job["apps"]},
-                             {"com.zabank.mobile", "com.zabank.vendor"})
-            # 巡邏：冇開 app → 靜默 re-arm
+            self.assertEqual({a["mode"] for a in job["apps"]},
+                             {"disabled"})
+            nxt = dt.datetime.fromisoformat(job["next"])
+            self.assertEqual((nxt.date(), nxt.hour, nxt.minute),
+                             (dt.date(2030, 1, 2), 0, 1))
+            self.assertTrue(any("disable-user --user 0 com.zabank.mobile"
+                                in c for c in calls))
+            # fire：靜默等（冇 patrol）
+            calls.clear()
             asyncio.run(bot._fire_later(dict(job), 0))
+            self.assertFalse(any("force-stop" in c for c in calls))
+            # 到期：pm enable 復活＋通知＋剷
+            stale = dict(bot._jobs()[0],
+                         apps=[{"pkg": "com.zabank.mobile",
+                                "label": "za", "until": "2020-01-01",
+                                "mode": "disabled"}])
+            calls.clear()
+            said.clear()
+            asyncio.run(bot._fire_later(stale, 0))
+            self.assertTrue(any("pm enable --user 0 com.zabank.mobile"
+                                in c for c in calls))
+            self.assertEqual(said[-1], "解封喇")
+            self.assertEqual(bot._jobs(), [])
+        finally:
+            self._teardown(olds, tmp)
+
+    def test_patrol_fallback(self):
+        """pm 死：巡邏模式——命中 force-stop＋旁白；提早解封照覆。"""
+        tmp = tempfile.mkdtemp()
+        said, olds = self._setup(tmp)
+        calls, fake_exec = self._mock_lane(disable_ok=False)
+        bot._shell_priv_exec = fake_exec
+        try:
+            now = dt.datetime.now()
+            r = bot._execute_player(
+                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
+            self.assertIn("巡邏中", r)
             job = bot._jobs()[0]
-            self.assertGreater(dt.datetime.fromisoformat(job["next"]), now)
-            # 巡邏：開緊 ZA → force-stop＋旁白
-            calls.clear(), said.clear()
-            calls2, fake_exec2 = self._mock_lane(fg_pkg="com.zabank.mobile")
+            self.assertEqual(job["apps"][0]["mode"], "patrol")
+            # 命中
+            calls2, fake_exec2 = self._mock_lane(disable_ok=False,
+                                                 fg_pkg="com.zabank.mobile")
             bot._shell_priv_exec = fake_exec2
             asyncio.run(bot._fire_later(dict(job), 0))
             self.assertTrue(any("force-stop com.zabank.mobile" in c
                                 for c in calls2))
             self.assertEqual(said, ["封印緊，專注返正嘢"])
-            # 過期 → 解封通知＋剷
-            stale = dict(bot._jobs()[0],
-                         apps=[{"pkg": "com.zabank.mobile",
-                                "label": "com.zabank.mobile",
-                                "until": "2020-01-01"}])
-            said.clear()
-            asyncio.run(bot._fire_later(stale, 0))
-            self.assertEqual(said[-1], "解封喇")
-            self.assertEqual(bot._jobs(), [])
             # 提早解封
             bot._shell_priv_exec = fake_exec
-            bot._execute_player(bot.parse_player("封印 za 到 2030-01-01"),
-                                1, now)
             r = bot._execute_player(bot.parse_player("解封 za"), 1, now)
             self.assertIn("已解封", r)
             self.assertEqual(bot._jobs(), [])
-            # 冇 lane 提示
-            bot._shell_priv_exec = (lambda cmd: (False, "x"))
-            r = bot._execute_player(
-                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
-            self.assertIn("rish", r)
         finally:
-            bot.JOBS_PATH, bot._arm, bot._send_safe = old_j, old_arm, old_ss
-            bot._say, bot._shell_priv_exec = old_say, old_exec
-            shutil.rmtree(tmp, ignore_errors=True)
+            self._teardown(olds, tmp)
