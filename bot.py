@@ -2289,12 +2289,22 @@ async def _fire_later(job: dict, delay: float) -> None:
             await _send_safe(job["chat_id"],
                              f"⏰ {job.get('label') or '時間到'}", "語音提醒")
         else:                               # 鬧鐘後備：開 1 秒鐘保證有聲
-            await _say(job.get("label") or "時間到", delay=4)
-            ok, info = await asyncio.to_thread(
-                run_intent, timer_intent_cmd(1, job.get("label", "")))
+            lbl = job.get("label") or "時間到"
+            ok, info = False, ""
+            for gap in (4, 10, 25):        # 深睡冷啟動重試三波
+                await _wait_wall(now + dt.timedelta(seconds=gap))
+                ok, info = await asyncio.to_thread(
+                    run_intent, timer_intent_cmd(1, lbl))
+                if ok:
+                    break
+                log.warning("鐘聲意圖第%s波失敗：%s", gap, str(info)[:90])
+            if not ok:
+                log.error("鐘聲三波全滅（%s）——TTS 連環錘頂上", lbl)
+                asyncio.create_task(_say_hammer(lbl))
             await _send_safe(job["chat_id"],
-                             (f"⏰ {job.get('label') or '時間到'}" if ok
-                              else f"❌ 響唔到（時鐘 app？）：{info[:120]}"),
+                             (f"⏰ {lbl}" if ok
+                              else f"❌ 鐘聲開唔到（時鐘 app 三波都超時）——"
+                                   f"語音連環叫緊你：{info[:80]}"),
                              "鬧鐘/計時到點")
         _TASKS.pop(job["id"], None)
         if job.get("daily"):
@@ -2310,12 +2320,23 @@ async def _fire_later(job: dict, delay: float) -> None:
         return
     if jtype == "series":
         secs = int(job.get("every") or job.get("seconds") or 60)
-        ok, info = await asyncio.to_thread(run_intent,
-                                           timer_intent_cmd(1, job.get("label", "")))
-        msg = (f"⏰ {job.get('label') or '時間到'}" if ok
-               else f"❌ 響唔到（時鐘 app？）：{info[:120]}")
+        lbl = job.get("label") or "時間到"
+        ok, info = False, ""
+        for gap in (0, 10, 25):            # 深睡冷啟動重試三波
+            if gap:
+                await _wait_wall(now + dt.timedelta(seconds=gap))
+            ok, info = await asyncio.to_thread(
+                run_intent, timer_intent_cmd(1, lbl))
+            if ok:
+                break
+            log.warning("連環鬧意圖第%s波失敗：%s", gap, str(info)[:90])
+        if not ok:
+            log.error("連環鬧鐘聲三波全滅（%s）——TTS 連環錘頂上", lbl)
+            asyncio.create_task(_say_hammer(lbl))
+        msg = (f"⏰ {lbl}" if ok
+               else f"❌ 鐘聲開唔到（三波超時）——語音連環叫緊你：{info[:80]}")
         await _send_safe(job["chat_id"], msg, "連環鬧")
-        await _say(job.get("label") or "時間到", delay=4)
+        await _say(lbl, delay=4 if ok else 1)
         fire_dt = dt.datetime.fromisoformat(job["next"])
         nxt = fire_dt + dt.timedelta(seconds=secs)
         we = job.get("window_end")
@@ -3944,6 +3965,14 @@ def _pkg_search(kw: str) -> list:
 
 def _seal_jobs() -> list:
     return [j for j in _jobs() if j.get("type") == "seal"]
+
+
+async def _say_hammer(text: str, times: int = 3) -> None:
+    """最後聲道：時鐘 app 開唔到（深睡冷啟動）就 TTS 連環錘醒人。"""
+    for i in range(times):
+        await _say(text)
+        if i < times - 1:
+            await asyncio.sleep(8)
 
 
 def _acquire_singleton(path: str | None = None) -> bool:
