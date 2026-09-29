@@ -3788,7 +3788,8 @@ class TestDailyAlarm(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         old_j = bot.JOBS_PATH
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
-        old_ri, rec = bot.run_intent, []
+        old_ri, old_arm, rec = bot.run_intent, bot._arm, []
+        bot._arm = lambda j: None
         bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
                           or (True, "OK"))
         try:
@@ -3797,13 +3798,20 @@ class TestDailyAlarm(unittest.TestCase):
                 bot.parse_player("鬧鐘 每日0734 看待辦"), 1, now)
             self.assertIn("已落手機時鐘", ack)
             self.assertIn("日日", ack)
+            self.assertIn("讀你聽", ack)
             self.assertIn("--eia", rec[-1])
             self.assertIn("android.intent.extra.alarm.DAYS 1,2,3,4,5,6,7",
                           rec[-1])
             self.assertIn("MESSAGE 看待辦", rec[-1])
             self.assertIn("HOUR 7", rec[-1])
-            self.assertEqual(bot._jobs(), [])     # 零 bot job
+            # 語音回聲：每日 timer bell（app 照主，回聲淨讀）
+            echo = [j for j in bot._jobs() if j["type"] == "bell"]
+            self.assertEqual(len(echo), 1)
+            self.assertEqual((echo[0]["bell"], echo[0]["daily"],
+                              echo[0]["hh"], echo[0]["mm"]),
+                             ("timer", True, 7, 34))
         finally:
+            bot._arm = old_arm
             bot.run_intent = old_ri
             bot.JOBS_PATH = old_j
             shutil.rmtree(tmp, ignore_errors=True)

@@ -152,7 +152,7 @@ HELP = (
     "🧩 時間分配（到點自動連環計時）：\n"
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
-    "🔊 語音：下一個（讀出下個任務）・講 [文字]（廣東話 TTS）\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
+    "🔊 語音：全線任務到點廣東話旁白・下一個（隨問隨讀）・講 [文字]\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
     "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
@@ -2240,6 +2240,7 @@ async def _fire_later(job: dict, delay: float) -> None:
             await _send_safe(job["chat_id"],
                              f"⏰ {job.get('label') or '時間到'}", "語音提醒")
         else:                               # 鬧鐘後備：開 1 秒鐘保證有聲
+            await _say(job.get("label") or "時間到")
             ok, info = await asyncio.to_thread(
                 run_intent, timer_intent_cmd(1, job.get("label", "")))
             await _send_safe(job["chat_id"],
@@ -2265,6 +2266,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         msg = (f"⏰ {job.get('label') or '時間到'}" if ok
                else f"❌ 響唔到（時鐘 app？）：{info[:120]}")
         await _send_safe(job["chat_id"], msg, "連環鬧")
+        await _say(job.get("label") or "時間到")
         fire_dt = dt.datetime.fromisoformat(job["next"])
         nxt = fire_dt + dt.timedelta(seconds=secs)
         we = job.get("window_end")
@@ -2369,6 +2371,7 @@ async def _fire_later(job: dict, delay: float) -> None:
     elif jtype == "nag":
         await _send_safe(job["chat_id"],
                          f"💧 {job.get('label') or '提醒時間到'}", "習慣提醒")
+        await _say(job.get("label") or "提醒時間到")
         nxt = now + dt.timedelta(seconds=int(job.get("every") or 3600))
         job["next"] = nxt.isoformat()
         jobs = _jobs()
@@ -2393,7 +2396,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         wmin, bmin = int(job.get("wmin", 25)), int(job.get("bmin", 5))
         elapsed = (now - start).total_seconds() / 60.0
         segs, acc, k = [], 0.0, 0          # (起分鐘, 迄分鐘, 名)
-        while acc <= elapsed:
+        while acc <= elapsed or not segs:   # 負延遲邊角都保證有段
             dur = wmin if k % 2 == 0 else bmin
             nm = (f"🎯 專注{k // 2 + 1}" if k % 2 == 0
                   else f"☕ 休息{k // 2 + 1}")
@@ -2428,6 +2431,7 @@ async def _fire_later(job: dict, delay: float) -> None:
                 msg = (how + "\n⏱ 已落時鐘 app（深度睡眠都準時）" if ok
                        else f"❌ {how}失敗：{info[:80]}")
                 await _send_safe(job["chat_id"], msg, "專注模式")
+                await _say(_speech_scrub(how))
         jobs = _jobs()
         for j in jobs:
             if j["id"] == job["id"]:
@@ -2445,6 +2449,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         elif pct <= thr and not chg and not job.get("alerted"):
             job["alerted"] = True
             msg = f"🔋 電量得 {pct}%（≤{thr}%、冇充電）——記得叉電！"
+            await _say(f"電量得{pct}厘，記得叉電")
         elif pct > thr + 5 or chg:
             job["alerted"] = False
         if msg:
@@ -2469,6 +2474,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         wurl = job.get("url") or job.get("label", "")
         ok, info = run_intent(web_intent_cmd(wurl))
         how = f"開網頁「{job.get('label')}」{wurl}"
+        await _say(f"開網頁{_speech_scrub(job.get('label') or '')}")
     else:
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"
@@ -3120,9 +3126,13 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         ok, info = run_intent(alarm_intent_cmd(cmd.hour, cmd.minute, lbl,
                                                days=DAILY))
         if ok:
+            echo = _add_bell(chat_id,
+                             _next_occurrence(now, cmd.hour, cmd.minute),
+                             lbl, "timer", daily=True)
             return (f"⏰ 已落手機時鐘 app：每日 {cmd.hour:02d}:{cmd.minute:02d}"
                     f" 響「{lbl}」——日日自動響，取消喺時鐘 app"
-                    "（重設同時間會疊多個，都喺 app 剷）")
+                    "（重設同時間會疊多個，都喺 app 剷）\n"
+                    f"🔊 到點 bot 仲會讀你聽（#{echo['id']}，「取消 {echo['id']}」刪）")
         job, replaced = _add_job(cmd, chat_id, now)   # app 設唔到 → bot 守返
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
         msg = (f"⏰ 每日鬧鐘（#{job['id']}）：日日 {cmd.hour:02d}:{cmd.minute:02d}"
@@ -3383,13 +3393,13 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
 # ---------------- Telegram handlers（延後 import，等 parser 可以單獨測試） ----------------
 
 def _add_bell(chat_id: int, fire_at: dt.datetime, label: str,
-              bell: str) -> dict:
+              bell: str, daily: bool = False) -> dict:
     """統一 bot 守（2026-09-25 用戶決定）：計時/計時到/鬧鐘全部入排程，
     到點 bot 開 1 秒計時器即響。回傳 job。"""
     jobs = _jobs()
     jid = max((j["id"] for j in jobs), default=0) + 1
     job = {"id": jid, "type": "bell", "bell": bell, "hh": fire_at.hour,
-           "mm": fire_at.minute, "daily": False, "label": label,
+           "mm": fire_at.minute, "daily": daily, "label": label,
            "chat_id": chat_id, "next": fire_at.isoformat(),
            "seconds": 0, "url": "", "shuffle": False, "paused": False}
     jobs.append(job)
@@ -3433,8 +3443,10 @@ def _execute(p: Parsed, now: dt.datetime, chat_id: int = 0) -> str:
         return f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}{tail}"
     ok, info = run_intent(alarm_intent_cmd(p.hour, p.minute, p.label))
     if ok:
+        echo = _add_bell(chat_id, p.fire_at, p.label or "時間到", "timer")
         return (f"⏰ 已落手機時鐘 app：鬧鐘 {p.hour:02d}:{p.minute:02d}{tag}"
-                "——系統自己響（深度睡眠都準時；取消喺時鐘 app）")
+                "——系統自己響（深度睡眠都準時；取消喺時鐘 app）\n"
+                f"🔊 到點 bot 仲會讀你聽（#{echo['id']} 淨撤語音）")
     job = _add_bell(chat_id, p.fire_at, p.label, "alarm")
     return (f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}"
             f"（#{job['id']}，「取消 {job['id']}」可刪）"
