@@ -3427,7 +3427,7 @@ class TestShortForms(unittest.TestCase):
 
 
 class TestFocusPurgeOnRestore(unittest.TestCase):
-    """bashrc 復活場景：殘留 focus job 恢復時要剷——唔係無限疊計時器。"""
+    """bashrc 復活場景：focus job 恢復＝牆鐘重算重返崗位——零疊計時器。"""
 
     def test_stale_focus_purged_on_restore(self):
         tmp = tempfile.mkdtemp()
@@ -3440,9 +3440,11 @@ class TestFocusPurgeOnRestore(unittest.TestCase):
             now = dt.datetime.now()
             jobs = [
                 {"id": 1, "type": "focus", "wmin": 25, "bmin": 5,
-                 "phase": "work", "label": "", "chat_id": 1, "hh": 10,
+                 "cycles": 3, "label": "", "chat_id": 1, "hh": 10,
                  "mm": 0, "daily": False, "seconds": 0, "url": "",
                  "shuffle": False, "paused": False,
+                 "session_start":
+                     (now - dt.timedelta(minutes=9)).isoformat(),
                  "next": (now - dt.timedelta(minutes=9)).isoformat()},
                 {"id": 2, "type": "play", "label": "lofi",
                  "url": "https://x", "chat_id": 1, "hh": 7, "mm": 0,
@@ -3452,12 +3454,29 @@ class TestFocusPurgeOnRestore(unittest.TestCase):
             ]
             with open(bot.JOBS_PATH, "w", encoding="utf-8") as f:
                 json.dump(jobs, f, ensure_ascii=False)
-            asyncio.run(bot._restore_jobs(None))
-            with open(bot.JOBS_PATH, encoding="utf-8") as f:
-                left = json.load(f)
-            self.assertEqual([j["type"] for j in left], ["play"])
-            self.assertIn(2, armed)
-            self.assertNotIn(1, armed)     # focus 冇再開火＝唔會疊計時器
+            rec2 = []
+            old_ri = bot.run_intent
+            bot.run_intent = (lambda cmd: rec2.append(" ".join(cmd))
+                              or (True, "OK"))
+
+            async def fs(cid, msg, tag=""):
+                pass
+            old_ss = bot._send_safe
+            bot._send_safe = fs
+            try:
+                asyncio.run(bot._restore_jobs(None))
+                # focus job 照恢復（重返崗位），play 都恢復
+                self.assertEqual([j["type"] for j in bot._jobs()],
+                                 ["focus", "play"])
+                self.assertIn(2, armed)
+                # 恢復後 fire：零落鐘（治根＝唔會疊計時器）
+                n0 = len(rec2)
+                asyncio.run(bot._fire_later(dict(bot._jobs()[0]), 0))
+                self.assertEqual(
+                    sum("SET_TIMER" in c for c in rec2[n0:]), 0)
+            finally:
+                bot.run_intent = old_ri
+                bot._send_safe = old_ss
         finally:
             bot.JOBS_PATH = old_j
             bot._arm = old_arm
@@ -3518,19 +3537,35 @@ class TestWaitWall(unittest.TestCase):
         self.assertIsNone(bot._nag_handle("提醒 每700分", 1))
 
     def test_focus_loop(self):
+        """治根版：session_start 錨定——開始嗰下全部計時器預落；job 淨旁述。"""
+        rec = []
+        old_ri = bot.run_intent
+        bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
+                          or (True, "OK"))
+        try:
+            self._focus_loop_body(rec)
+        finally:
+            bot.run_intent = old_ri
+
+    def _focus_loop_body(self, rec):
         r = bot._focus_handle("專注 25 數學", 1)
-        self.assertIn("25 分鐘工作", r)
-        self.assertIn("5 分鐘休息", r)
-        jobs = bot._jobs()
-        self.assertEqual((jobs[0]["type"], jobs[0]["wmin"], jobs[0]["bmin"],
-                          jobs[0]["phase"]), ("focus", 25, 5, "work"))
-        asyncio.run(bot._fire_later(dict(jobs[0]), 0))
-        self.assertIn("SET_TIMER", self.seen["cmd"])
-        self.assertIn("1500", self.seen["cmd"])          # 25 分鐘落計時器
-        self.assertIn("專注 25 分鐘", self.seen["msgs"][-1])
-        self.assertEqual(bot._jobs()[0]["phase"], "break")
-        r2 = bot._focus_handle("專注結束", 1)
-        self.assertIn("收工", r2)
+        self.assertIn("一次過落咗時鐘 app", r)
+        self.assertEqual(sum("SET_TIMER" in c for c in rec), 5)
+        job = bot._jobs()[0]
+        self.assertEqual((job["type"], job["cycles"]), ("focus", 3))
+        self.assertIsNotNone(job.get("session_start"))
+        # 邊界 fire（模擬復活）：零落鐘＋旁述＋next 牆鐘重算
+        n0 = len(rec)
+        asyncio.run(bot._fire_later(dict(job), 0))
+        self.assertEqual(sum("SET_TIMER" in c for c in rec[n0:]), 0)
+        self.assertIn("而家係", self.seen["msgs"][-1])
+        self.assertEqual(bot._jobs()[0]["next"], job["next"])  # +25min 不變
+        # 過期 fire（session 完）→ 🏁＋剷 job
+        stale = dict(job, session_start=(
+            bot.dt.datetime.fromisoformat(job["session_start"])
+            - bot.dt.timedelta(minutes=90)).isoformat())
+        asyncio.run(bot._fire_later(stale, 0))
+        self.assertIn("專注完成", self.seen["msgs"][-1])
         self.assertEqual([j for j in bot._jobs()
                           if j.get("type") == "focus"], [])
 

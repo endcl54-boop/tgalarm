@@ -126,7 +126,8 @@ HELP = (
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
     "・外賣模式：打「外賣」開——所有計時提早 5 分鐘響；「外賣結束」收工\n"
-    "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
+    "🎯 專注：專注 25——全部循環計時器一次過落時鐘app（bot 死都照響、\n"
+    "　 重啟復活唔會疊）・專注結束\n"
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
     "📅 倒數 考試 2027-05-04／倒數 聖誕 12-25（每年）／倒數（清單）　🎲 分組 3 阿明,阿強,阿寶\n"
     "⏰ 鬧鐘（直接落手機時鐘 app，系統自己響）：\n"
@@ -954,15 +955,38 @@ def _focus_handle(t: str, chat_id: int):
         return "❓ 專注時長要 5–240 分鐘。例：專注 25"
     label = m.group(2).strip()[:40]
     bmin = max(5, wmin // 5)
+    # 治根設計（2026-09-29 用戶拍板）：全部循環計時器 session 開始嗰下一次過
+    # 落時鐘 app；job 淨係做牆鐘旁述（重啟/復活＝重算，永遠唔會再掂時鐘 app
+    # ——bashrc 復活循環下疊計時器物理上不可能）
+    cycles = 3 if wmin <= 30 else 2
+    n_ok, elapsed = 0, 0
+    for i in range(cycles):
+        ok, _ = run_intent(timer_intent_cmd(
+            elapsed + wmin * 60,
+            ("🎯 專注%d %s" % (i + 1, label)).strip()))
+        n_ok += ok
+        elapsed += wmin * 60
+        if i < cycles - 1:
+            ok2, _ = run_intent(timer_intent_cmd(
+                elapsed + bmin * 60,
+                ("☕ 休息%d %s" % (i + 1, label)).strip()))
+            n_ok += ok2
+            elapsed += bmin * 60
     now = dt.datetime.now()
     job = _add_simple_job(chat_id, {
-        "type": "focus", "wmin": wmin, "bmin": bmin, "phase": "work",
+        "type": "focus", "wmin": wmin, "bmin": bmin, "cycles": cycles,
+        "session_start": now.isoformat(),
         "label": label, "chat_id": chat_id,
-        "hh": now.hour, "mm": now.minute, "next": now.isoformat()})
+        "hh": now.hour, "mm": now.minute,
+        "next": (now + dt.timedelta(seconds=wmin * 60)).isoformat()})
     tag = f"（{label}）" if label else ""
-    return (f"🎯 專注模式開始{tag}：{wmin} 分鐘工作／{bmin} 分鐘休息循環"
-            f"——即刻落第一個計時器。「專注結束」收工")
+    total = cycles * wmin + (cycles - 1) * bmin
+    return (f"🎯 專注模式開始{tag}：{cycles} 輪 {wmin} 分工作／{bmin} 分休息"
+            f"（共 {total} 分鐘）——{n_ok} 個計時器一次過落咗時鐘 app，"
+            "bot 死咗都照響。\n「專注結束」收工（時鐘 app 剷走剩低計時器）")
 
+
+# ---- 電量守（每個鐘查一次，低過門檻警一次）----
 
 # ---- 電量守（每個鐘查一次，低過門檻警一次）----
 
@@ -2090,6 +2114,7 @@ def _fmt_job_content(j: dict) -> str:
         return f"每{(j.get('every') or 3600) // 60}分 {j.get('label', '')}"
     if j.get("type") == "focus":
         return (f"專注 {j.get('wmin', 25)}/{j.get('bmin', 5)}"
+                f"×{j.get('cycles', 3)}"
                 + (f"（{j['label']}）" if j.get("label") else ""))
     if j.get("type") == "battery":
         return f"電量守 ≤{j.get('thr', 20)}%"
@@ -2313,29 +2338,45 @@ async def _fire_later(job: dict, delay: float) -> None:
         _arm(job)
         return
     elif jtype == "focus":
+        # 純牆鐘錨定：phase 由 session_start+偏移決定，唔使 state。
+        # 錯過嘅邊界唔補鐘（計時器已全數喺時鐘 app）——呢度淨係旁述＋排下次。
+        start = dt.datetime.fromisoformat(job["session_start"])
         wmin, bmin = int(job.get("wmin", 25)), int(job.get("bmin", 5))
-        if job.get("phase", "work") == "work":
-            secs = wmin * 60
-            ok, info = await asyncio.to_thread(
-                run_intent, timer_intent_cmd(secs, f"專注 {job.get('label', '')}".strip()))
-            how = f"🎯 開始專注 {wmin} 分鐘" + (f"（{job['label']}）" if job.get("label") else "")
-            job["phase"] = "break"
-        else:
-            secs = bmin * 60
-            ok, info = await asyncio.to_thread(
-                run_intent, timer_intent_cmd(secs, "休息完再開工"))
-            how = f"☕ 休息 {bmin} 分鐘"
-            job["phase"] = "work"
-        msg = (how + "\n⏱ 已落時鐘 app（深度睡眠都準時）" if ok
-               else f"❌ {how}失敗：{info[:80]}")
-        await _send_safe(job["chat_id"], msg, "專注模式")
-        nxt = now + dt.timedelta(seconds=secs)
-        job["next"] = nxt.isoformat()
+        cycles = int(job.get("cycles", 3 if wmin <= 30 else 2))
+        total = cycles * wmin + (cycles - 1) * bmin
+        elapsed = (now - start).total_seconds() / 60.0
+        if elapsed >= total:
+            tag = f"（{job.get('label')}）" if job.get("label") else ""
+            await _send_safe(job["chat_id"],
+                             f"🏁 專注完成{tag}——{total} 分鐘收工，好嘢！",
+                             "專注模式")
+            _save_json(JOBS_PATH,
+                       [j for j in _jobs() if j["id"] != job["id"]])
+            _TASKS.pop(job["id"], None)
+            return
+        segs = []                    # (起分鐘, 迄分鐘, 名)
+        acc = 0
+        for i in range(cycles):
+            segs.append((acc, acc + wmin, f"🎯 專注{i + 1}"))
+            acc += wmin
+            if i < cycles - 1:
+                segs.append((acc, acc + bmin, f"☕ 休息{i + 1}"))
+                acc += bmin
+        cur = segs[-1]
+        for s0, s1, nm in segs:
+            if elapsed < s1:
+                cur = (s0, s1, nm)
+                break
+        tag = f"（{job.get('label')}）" if job.get("label") else ""
+        end_at = start + dt.timedelta(minutes=cur[1])
+        await _send_safe(job["chat_id"],
+                         f"⏳ 而家係 {cur[2]}{tag}——{end_at:%H:%M} 響鐘轉下段",
+                         "專注模式")
+        job["next"] = end_at.isoformat()
         jobs = _jobs()
         for j in jobs:
             if j["id"] == job["id"]:
                 j["next"] = job["next"]
-                j["phase"] = job["phase"]
         _save_json(JOBS_PATH, jobs)
         _TASKS.pop(job["id"], None)
         _arm(job)
@@ -2826,14 +2867,6 @@ async def _restore_jobs(app) -> None:
                 job["idx"] = 0  # 分配鏈由頭嚟過
                 job["_rem"] = 0
             changed = True
-    # focus job 唔准過夜：phase 計時器已預先喺時鐘 app 行緊；
-    # bot 死過（超級省電/重啟）再恢復會即刻開火→再疊一個計時器
-    # （bashrc 復活循環下無限疊加——2026-09-29 用戶實證）
-    stale = [j for j in jobs if j.get("type") == "focus"]
-    if stale:
-        jobs = [j for j in jobs if j.get("type") != "focus"]
-        _save_json(JOBS_PATH, jobs)
-        log.info("已清除 %d 個殘留專注任務（計時器喺時鐘 app 照行）", len(stale))
     if changed:
         _save_json(JOBS_PATH, jobs)
     for job in jobs:
