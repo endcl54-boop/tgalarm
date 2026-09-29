@@ -744,13 +744,18 @@ def web_intent_cmd(url: str) -> list:
     return ["am", "start", "-a", "android.intent.action.VIEW", "-d", url]
 
 
-def run_intent(cmd: list) -> tuple:
-    """執行 am intent；回傳 (成功與否, 系統輸出)。DRY_RUN 只打印。"""
+def run_intent(cmd: list, timeout: float = 10.0) -> tuple:
+    """執行 am intent；回傳 (成功與否, 系統輸出)。DRY_RUN 只打印。
+
+    timeout=10 對深睡冷啟動夠；但 2026-09-30 logcat 實證：夜間 low memory
+    killer 連 deskclock 都殺（03:36 am_kill），記憶體壓力下冷啟動可以遠超
+    10 秒——鐘聲類調用傳 60。"""
     if DRY_RUN:
         log.info("DRY_RUN: %s", shlex.join(cmd))
         return True, "DRY_RUN " + shlex.join(cmd)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout)
         out = (r.stdout + r.stderr).strip()
         ok = r.returncode == 0 and "Error" not in out
         if not ok:
@@ -2294,7 +2299,7 @@ async def _fire_later(job: dict, delay: float) -> None:
             for gap in (4, 10, 25):        # 深睡冷啟動重試三波
                 await _wait_wall(now + dt.timedelta(seconds=gap))
                 ok, info = await asyncio.to_thread(
-                    run_intent, timer_intent_cmd(1, lbl))
+                    run_intent, timer_intent_cmd(1, lbl), 60)
                 if ok:
                     break
                 log.warning("鐘聲意圖第%s波失敗：%s", gap, str(info)[:90])
@@ -2326,7 +2331,7 @@ async def _fire_later(job: dict, delay: float) -> None:
             if gap:
                 await _wait_wall(now + dt.timedelta(seconds=gap))
             ok, info = await asyncio.to_thread(
-                run_intent, timer_intent_cmd(1, lbl))
+                run_intent, timer_intent_cmd(1, lbl), 60)
             if ok:
                 break
             log.warning("連環鬧意圖第%s波失敗：%s", gap, str(info)[:90])

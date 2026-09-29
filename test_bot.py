@@ -349,7 +349,7 @@ class TestTimerCap(unittest.TestCase):
     def test_99999h_goes_to_clock_app(self):
         """手機計時器上限 99999 小時（用戶證實）——最大值都直接落 app。"""
         seen = {}
-        def fake(cmd):
+        def fake(cmd, t=0):
             seen["cmd"] = " ".join(cmd)
             return True, "OK"
         old = bot.run_intent
@@ -365,7 +365,7 @@ class TestTimerCap(unittest.TestCase):
 
     def test_timer_goes_to_clock_app(self):
         seen = {}
-        def fake(cmd):
+        def fake(cmd, t=0):
             seen["cmd"] = " ".join(cmd)
             return True, "OK"
         old = bot.run_intent
@@ -382,7 +382,7 @@ class TestTimerCap(unittest.TestCase):
 
     def test_alarm_goes_to_clock_app(self):
         seen = {}
-        def fake(cmd):
+        def fake(cmd, t=0):
             seen["cmd"] = " ".join(cmd)
             return True, "OK"
         old = bot.run_intent
@@ -398,7 +398,7 @@ class TestTimerCap(unittest.TestCase):
 
     def test_intent_fail_falls_back_to_bell(self):
         old = bot.run_intent
-        bot.run_intent = lambda cmd: (False, "boom")
+        bot.run_intent = lambda cmd, t=0: (False, "boom")
         try:
             r = _execute(parse_command("鬧鐘 0700", NOW), NOW, chat_id=1)
         finally:
@@ -411,7 +411,7 @@ class TestTimerCap(unittest.TestCase):
         bot._save_json = lambda p, d: None
         bot._TAKEAWAY["on"] = False
         seen = {}
-        def fake(cmd):
+        def fake(cmd, t=0):
             seen["cmd"] = " ".join(cmd)
             return True, "OK"
         oi = bot.run_intent
@@ -438,7 +438,7 @@ class TestTimerCap(unittest.TestCase):
         bot._save_json = lambda p, d: None
         bot._TAKEAWAY["on"] = False
         seen = {}
-        def fake(cmd):
+        def fake(cmd, t=0):
             seen["cmd"] = " ".join(cmd)
             return True, "OK"
         oi = bot.run_intent
@@ -476,7 +476,7 @@ class TestTimerCap(unittest.TestCase):
 
     def test_timer_intent_fail_falls_back_to_bell(self):
         old = bot.run_intent
-        bot.run_intent = lambda cmd: (False, "boom")
+        bot.run_intent = lambda cmd, t=0: (False, "boom")
         try:
             r = _execute(parse_command("計時 25分鐘", NOW), NOW, chat_id=1)
         finally:
@@ -812,7 +812,7 @@ class TestStopFallback(unittest.TestCase):
 
     def test_prefers_system_am(self):
         calls = []
-        def fake(cmd):
+        def fake(cmd, t=0):
             calls.append(cmd)
             return True, ""
         bot.run_intent = fake
@@ -822,7 +822,7 @@ class TestStopFallback(unittest.TestCase):
 
     def test_fallback_to_path_am(self):
         seq = iter([(False, "termux-am 唔支援"), (True, "")])
-        bot.run_intent = lambda cmd: next(seq)
+        bot.run_intent = lambda cmd, t=0: next(seq)
         ok, _ = bot._stop()
         self.assertTrue(ok)
 
@@ -904,7 +904,7 @@ class TestDestinations(unittest.TestCase):
     def test_open_nav_uri_building(self):
         calls = []
         old = bot.run_intent
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "")
         try:
             bot._open_nav("沙田石門安群街1號", "w")
             self.assertIn("google.navigation:q=", calls[0][-1])
@@ -988,20 +988,20 @@ class TestStopChainLayers(unittest.TestCase):
     def test_audio_focus_when_termux_api_present(self):
         bot.shutil.which = lambda name: "/x/termux-media-player"
         calls = []
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "")
         ok, how = bot._stop()
         self.assertEqual((ok, how), (True, "audio-focus"))
         self.assertIn("silence.wav", calls[0][2])
 
     def test_home_fallback_when_all_denied(self):
-        def fake(cmd):
+        def fake(cmd, t=0):
             return (any("HOME" in part for part in cmd), "")  # force-stop 全 fail，HOME start 成功
         bot.run_intent = fake
         ok, how = bot._stop()
         self.assertEqual((ok, how), (True, "home"))
 
     def test_all_layers_fail(self):
-        bot.run_intent = lambda cmd: (False, "denied")
+        bot.run_intent = lambda cmd, t=0: (False, "denied")
         ok, how = bot._stop()
         self.assertFalse(ok)
 
@@ -1212,7 +1212,7 @@ class TestAlloc(unittest.TestCase):
         got = []
         old = bot.run_intent
 
-        def fake(cmd):
+        def fake(cmd, t=0):
             for i, a in enumerate(cmd):
                 if a == "android.intent.extra.alarm.LENGTH":
                     got.append(int(cmd[i + 1]))
@@ -1259,7 +1259,7 @@ class TestAlloc(unittest.TestCase):
                "paused": False, "segments": segs, "idx": 0, "buf": 20}
         bot._save_json(bot.JOBS_PATH, [job])
         old = bot.run_intent
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
         loop = asyncio.new_event_loop()
         try:
             prev = dt.datetime.fromisoformat(job["next"])
@@ -1468,7 +1468,7 @@ class TestSelfcheck(unittest.TestCase):
         self.assertEqual(bot.parse_player("權限").action, "protect")
         calls = []
         old = bot.run_intent
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "")
         try:
             r = bot._execute_player(bot.parse_player("修復"), 12345, dt.datetime(2026, 1, 5))
         finally:
@@ -2019,7 +2019,7 @@ class TestNavFallback(unittest.TestCase):
         """pattern: list 開頭/結尾撇要失敗。回傳 (calls, run_intent_func)"""
         calls = []
 
-        def run(cmd):
+        def run(cmd, t=0):
             calls.append(cmd)
             n = len(calls) - 1
             if pattern[n]:
@@ -2094,7 +2094,7 @@ class TestOpenNavRish(unittest.TestCase):
     def test_rish_first_when_available(self):
         bot._RISH_CACHE.update({"t": 1e18, "ok": True})
         calls = []
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "ok")
         ok, _ = bot._open_nav("沙田石門安群街1號", "r")
         self.assertTrue(ok)
         self.assertEqual(len(calls), 1)
@@ -2107,7 +2107,7 @@ class TestOpenNavRish(unittest.TestCase):
     def test_rish_fail_falls_back_to_am(self):
         bot._RISH_CACHE.update({"t": 1e18, "ok": True})
         calls = []
-        def run(cmd):
+        def run(cmd, t=0):
             calls.append(cmd)
             return (False, "Service has not been started") if cmd[0] == "rish" else (True, "")
         bot.run_intent = run
@@ -2119,7 +2119,7 @@ class TestOpenNavRish(unittest.TestCase):
     def test_rish_unavailable_goes_straight_am(self):
         bot._RISH_CACHE.update({"t": 1e18, "ok": False})
         calls = []
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "")
         bot._open_nav("沙田", "r")
         self.assertEqual(calls[0][0], "am")  # 冇 rish 就直接 am
 
@@ -2215,7 +2215,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._send_safe = fake_send
         bot._jobs = lambda: []
         bot._save_json = lambda *a, **k: None
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
         bot._RISH_CACHE.update({"t": 1e18, "ok": True})  # 舊 cache 話 ok，都要重探
         # 新流程：通知彈窗先；呢度強制行後備直開路，驗證重探＋警告仍然喺度
         bot._nav_confirm_notify = lambda job: (False, "冇 termux-notification")
@@ -2245,7 +2245,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._jobs = lambda: []
         bot._save_json = lambda *a, **k: None
         calls = []
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "ok")
         bot._RISH_CACHE.update({"t": 0.0, "ok": False})
         bot._nav_confirm_notify = lambda job: (True, "ok")
         kbs = []
@@ -2268,7 +2268,7 @@ class TestNavFireRishWarning(unittest.TestCase):
         bot._jobs = lambda: []
         bot._save_json = lambda *a, **k: None
         calls = []
-        bot.run_intent = lambda cmd: calls.append(cmd) or (True, "ok")
+        bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "ok")
         bot._shell_priv_exec = lambda s: calls.append(["wake", s]) or (True, "")
         bot._nav_confirm_notify = lambda job: (True, "ok")
         kbs = []
@@ -2714,7 +2714,7 @@ class TestBell(unittest.TestCase):
         async def fake_send(cid, text, label=""):
             sent.append(text)
             return True
-        bot.run_intent = lambda cmd: fired.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: fired.append(cmd) or (True, "")
         bot._send_safe = fake_send
         said = []
         old_say = bot._say
@@ -2804,7 +2804,7 @@ class TestSeries(unittest.TestCase):
         async def fake_send(cid, text, label=""):
             sent.append(text)
             return True
-        def fake_intent(cmd):
+        def fake_intent(cmd, t=0):
             fired.append(cmd)
             return True, ""
         bot.run_intent = fake_intent
@@ -2833,7 +2833,7 @@ class TestSeries(unittest.TestCase):
         async def fake_send(cid, text, label=""):
             sent.append(text)
             return True
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
         bot._send_safe = fake_send
         job = {"id": 61, "type": "series", "hh": start.hour, "mm": start.minute,
                "end_hh": start.hour, "end_mm": start.minute,   # 即刻到期
@@ -2856,7 +2856,7 @@ class TestSeries(unittest.TestCase):
         async def fake_send(cid, text, label=""):
             sent.append(text)
             return True
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
         bot._send_safe = fake_send
         removed = []
         job = {"id": 62, "type": "series", "hh": now.hour, "mm": now.minute,
@@ -2899,7 +2899,7 @@ class TestSeries(unittest.TestCase):
         async def fake_send(cid, text, label=""):
             sent.append(text)
             return True
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
         bot._send_safe = fake_send
         job = {"id": 63, "type": "series", "hh": 21, "mm": 0,
                "end_hh": 0, "end_mm": 0, "every": 3600, "label": "報更",
@@ -3247,7 +3247,7 @@ class TestNavDialogTask(unittest.TestCase):
             started.append(job["id"])
         bot._nav_keyboard_msg = fake_kb
         bot._shell_priv_exec = lambda s: (True, "")
-        bot.run_intent = lambda cmd: (True, "")
+        bot.run_intent = lambda cmd, t=0: (True, "")
 
         async def fake_send(cid, text, label=""):
             return True
@@ -3335,7 +3335,7 @@ class TestWebPage(unittest.TestCase):
         now = dt.datetime(2026, 9, 27, 12, 0)
         bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
         seen = {}
-        bot.run_intent = lambda cmd: seen.update(cmd=" ".join(cmd)) or (True, "OK")
+        bot.run_intent = lambda cmd, t=0: seen.update(cmd=" ".join(cmd)) or (True, "OK")
         r = bot._execute_player(self._p("開網頁 新聞"), 1, now)
         self.assertIn("開緊網頁", r)
         self.assertIn("VIEW", seen["cmd"])
@@ -3363,7 +3363,7 @@ class TestWebPage(unittest.TestCase):
         now = dt.datetime(2026, 9, 27, 12, 0)
         bot._execute_player(self._p("網頁 新聞 https://news.rthk.hk"), 1, now)
         seen = {}
-        bot.run_intent = lambda cmd: seen.update(cmd=" ".join(cmd)) or (True, "OK")
+        bot.run_intent = lambda cmd, t=0: seen.update(cmd=" ".join(cmd)) or (True, "OK")
 
         async def fake_send(cid, msg, tag=""):
             seen["msg"] = msg
@@ -3464,7 +3464,7 @@ class TestFocusResumeOnRestore(unittest.TestCase):
                 json.dump(jobs, f, ensure_ascii=False)
             rec2 = []
             old_ri = bot.run_intent
-            bot.run_intent = (lambda cmd: rec2.append(" ".join(cmd))
+            bot.run_intent = (lambda cmd, t=0: rec2.append(" ".join(cmd))
                               or (True, "OK"))
 
             async def fs(cid, msg, tag=""):
@@ -3504,7 +3504,7 @@ class TestWaitWall(unittest.TestCase):
         self._arm = bot._arm
         bot._arm = lambda j: None
         self.seen = {"msgs": []}
-        bot.run_intent = (lambda cmd: self.seen.update(cmd=" ".join(cmd))
+        bot.run_intent = (lambda cmd, t=0: self.seen.update(cmd=" ".join(cmd))
                           or (True, "OK"))
 
         async def fs(cid, msg, tag=""):
@@ -3549,7 +3549,7 @@ class TestWaitWall(unittest.TestCase):
         """治根 v3：唔預落（逐段落鐘）＋牆鐘重算（復活返崗位）＋殭屍閘。"""
         rec = []
         old_ri = bot.run_intent
-        bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
+        bot.run_intent = (lambda cmd, t=0: rec.append(" ".join(cmd))
                           or (True, "OK"))
         try:
             self._focus_loop_body(rec)
@@ -3647,7 +3647,7 @@ class TestSeriesWindow(unittest.TestCase):
         self._si, self._ss = bot.run_intent, bot._send_safe
         self._arm = bot._arm
         bot._arm = lambda j: None
-        bot.run_intent = lambda cmd: (True, "OK")
+        bot.run_intent = lambda cmd, t=0: (True, "OK")
 
         async def fs(cid, msg, tag=""):
             pass
@@ -3790,7 +3790,7 @@ class TestDailyAlarm(unittest.TestCase):
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
         old_ri, old_arm, rec = bot.run_intent, bot._arm, []
         bot._arm = lambda j: None
-        bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
+        bot.run_intent = (lambda cmd, t=0: rec.append(" ".join(cmd))
                           or (True, "OK"))
         try:
             now = dt.datetime.now()
@@ -3822,7 +3822,7 @@ class TestDailyAlarm(unittest.TestCase):
         old_j, old_arm, old_ri = bot.JOBS_PATH, bot._arm, bot.run_intent
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
         bot._arm = lambda j: None
-        bot.run_intent = lambda cmd: (False, "SecurityException: x")
+        bot.run_intent = lambda cmd, t=0: (False, "SecurityException: x")
         try:
             now = dt.datetime.now()
             ack = bot._execute_player(
@@ -3939,7 +3939,7 @@ class TestTTS(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         old_j, old_ri = bot.JOBS_PATH, bot.run_intent
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
-        bot.run_intent = lambda cmd: (True, "OK")
+        bot.run_intent = lambda cmd, t=0: (True, "OK")
         said = []
 
         async def fs(cid, msg, tag=""):
@@ -3982,7 +3982,7 @@ class TestTimerBellSpeaks(unittest.TestCase):
             return True
         old_ri, old_ss, old_j = bot.run_intent, bot._send_safe, bot.JOBS_PATH
         old_say = bot._say
-        bot.run_intent = lambda cmd: fired.append(cmd) or (True, "")
+        bot.run_intent = lambda cmd, t=0: fired.append(cmd) or (True, "")
         bot._send_safe = fake_send
         said = []
 
@@ -4015,7 +4015,7 @@ class TestSeal(unittest.TestCase):
     def _mock_lane(self, disable_ok=True, fg_pkg=""):
         calls = []
 
-        def fake_exec(cmd):
+        def fake_exec(cmd, t=0):
             calls.append(cmd)
             if "disable-user" in cmd:
                 return (disable_ok, "")
