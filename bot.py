@@ -132,7 +132,7 @@ HELP = (
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
     "📅 倒數 考試 2027-05-04／倒數 聖誕 12-25（每年）／倒數（清單）　🎲 分組 3 阿明,阿強,阿寶\n"
     "⏰ 鬧鐘（直接落手機時鐘 app，系統自己響）：\n"
-    "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身\n"
+    "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身　・鬧鐘 每日0734 標籤＝日日\n"
     "・連環鬧：鬧鐘 0900-1700 每60分鐘 轉位；過午夜都得（2100-0000 報更）；可拆兩行寫；頭加「每日」＝日日\n"
     "（後面加文字會變成標籤，例如：計時 10分鐘 杯麵）\n"
     "📦 批次輸入：一次過 send 幾行，每行一個指令\n"
@@ -571,6 +571,16 @@ def parse_player(text: str) -> PlayerCmd | None:
                              hour2=r2[0], minute2=r2[1],
                              buf=b_pct, buf_min=b_min, ref=m.group(5).strip())
         return None
+    # 每日單鬧：鬧鐘 每日0734 標籤（用戶直覺寫法——2026-09-29）
+    m = re.match(r"^(?:鬧鐘|闹钟|alarm)\s*(每日|每天|everyday)\s*"
+                 r"(\d{1,2}):?(\d{2})\s*(?!.*[-–—~至到])\s*(.*)$",
+                 s, re.IGNORECASE)
+    if m:
+        sh, sm = int(m.group(2)), int(m.group(3))
+        if sh <= 23 and sm <= 59:
+            return PlayerCmd("sched_alarm_daily", hour=sh, minute=sm,
+                             ref=m.group(4).strip())
+        return None
     # 連環鬧：[每日] 鬧鐘/計時 hhmm-hhmm 每x分鐘 [文字]
     m = re.match(r"^(每日|每天|everyday)?\s*(?:鬧鐘|闹钟|alarm|計時|计时|timer)?\s*"
                  r"(\d{1,2}):?(\d{2})\s*[-–—~至到]\s*(\d{1,2}):?(\d{2})\s*"
@@ -589,9 +599,19 @@ def parse_player(text: str) -> PlayerCmd | None:
     # 每日 hhmm <計時 時長 | [隨機]播> [名/連結/標籤]
     m = re.match(r"^(?:每日|每天|everyday)\s*", s, re.IGNORECASE)
     if m:
-        r = _read_hhmm(s[m.end():])
+        head = s[m.end():]                       # 每日 鬧鐘 0734 標籤
+        r = _read_hhmm(re.sub(r"^(?:鬧鐘|闹钟|alarm)\s*", "", head,
+                             flags=re.IGNORECASE))
         if r:
             hh, mm, rest = r
+            # 每日 0734 鬧鐘 標籤（鬧鐘字眼喺時間後面都收）
+            if (head[:2] in ("鬧鐘", "闹钟")
+                    or re.match(r"^(?:鬧鐘|闹钟|alarm)\s", rest,
+                                re.IGNORECASE)):
+                label = re.sub(r"^(?:鬧鐘|闹钟|alarm)\s*", "", rest,
+                               flags=re.IGNORECASE)
+                return PlayerCmd("sched_alarm_daily", hour=hh, minute=mm,
+                                 ref=label.strip())
             tm = re.match(r"計時\s*(.*)$", rest)
             if tm:
                 seconds, end = _parse_duration(tm.group(1))
@@ -2203,8 +2223,17 @@ async def _fire_later(job: dict, delay: float) -> None:
                          (f"⏰ {job.get('label') or '時間到'}" if ok
                           else f"❌ 響唔到（時鐘 app？）：{info[:120]}"),
                          "鬧鐘/計時到點")
-        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
         _TASKS.pop(job["id"], None)
+        if job.get("daily"):
+            job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
+            jobs = _jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["next"] = job["next"]
+            _save_json(JOBS_PATH, jobs)
+            _arm(job)
+            return
+        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
         return
     if jtype == "series":
         secs = int(job.get("every") or job.get("seconds") or 60)
@@ -2691,9 +2720,12 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
     is_nav = cmd.action in ("sched_nav", "sched_nav_daily")
     is_web = cmd.action in ("sched_web", "sched_web_daily")
     is_series = cmd.action in ("series", "series_daily")
+    is_alarm = cmd.action == "sched_alarm_daily"
     jtype = ("series" if is_series
              else ("timer" if is_timer
-                   else ("nav" if is_nav else ("web" if is_web else "play"))))
+                   else ("nav" if is_nav
+                         else ("web" if is_web
+                               else ("bell" if is_alarm else "play")))))
     jobs = _jobs()
     # 去重：同類型 + 同 hh:mm  collide → 取代舊嘅
     replaced = [j["id"] for j in jobs
@@ -2717,7 +2749,7 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
     job = {"id": jid, "type": jtype, "hh": cmd.hour, "mm": cmd.minute,
            "daily": cmd.action in ("sched_daily", "sched_timer_daily",
                                    "sched_nav_daily", "sched_web_daily",
-                                   "series_daily"),
+                                   "series_daily", "sched_alarm_daily"),
            "url": url, "seconds": seconds, "mode": mode,
            "label": label or cmd.ref or default_label,
            "chat_id": chat_id, "next": first.isoformat(),
@@ -3053,6 +3085,13 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         msg = (f"⏰ 已排連環鬧（{kind} #{job['id']}）："
                f"{cmd.hour:02d}:{cmd.minute:02d}–{cmd.hour2:02d}:{cmd.minute2:02d} "
                f"每{cmd.seconds // 60}分鐘 響「{job['label'] or '時間到'}」（共 {n} 響）")
+        return msg + _replaced_note(replaced)
+    if a == "sched_alarm_daily":
+        job, replaced = _add_job(cmd, chat_id, now)
+        when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
+        msg = (f"⏰ 每日鬧鐘（#{job['id']}）：日日 {cmd.hour:02d}:{cmd.minute:02d}"
+               f" 響「{job['label'] or '時間到'}」——下次 {when}；"
+               f"「取消 {job['id']}」刪")
         return msg + _replaced_note(replaced)
     if a in ("sched_timer", "sched_timer_daily"):
         job, replaced = _add_job(cmd, chat_id, now, seconds=cmd.seconds)

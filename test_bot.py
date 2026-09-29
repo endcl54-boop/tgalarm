@@ -3752,3 +3752,77 @@ class TestSingletonLock(unittest.TestCase):
         finally:
             bot._LOCK_FH = None
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+class TestDailyAlarm(unittest.TestCase):
+    """每日單鬧：鬧鐘 每日0734 標籤（用戶直覺寫法）——到點 1 秒鐘、翻日再響。"""
+
+    def test_parse_forms(self):
+        now = dt.datetime(2026, 9, 29, 13, 20)
+        for txt in ("鬧鐘 每日0734 看待辦", "鬧鐘 每日 0734 看待辦",
+                    "每日 鬧鐘 0734 看待辦", "每日0734 鬧鐘 看待辦"):
+            p = bot.parse_player(txt)
+            self.assertIsNotNone(p, txt)
+            self.assertEqual((p.action, p.hour, p.minute, p.ref),
+                             ("sched_alarm_daily", 7, 34, "看待辦"), txt)
+        # 舊路唔破壞
+        self.assertIsNone(bot.parse_player("鬧鐘 0734 看待辦"))   # 即刻鬧鐘
+        c = bot.parse_command("鬧鐘 0734 看待辦", now)
+        self.assertEqual((c.kind, c.hour, c.minute), ("alarm", 7, 34))
+        p = bot.parse_player("鬧鐘 0900-1700 每60分鐘 轉位")
+        self.assertEqual(p.action, "series")                     # 連環鬧
+        p = bot.parse_player("每日 0900 計時 25分鐘")
+        self.assertEqual(p.action, "sched_timer_daily")          # 每日計時
+
+    def test_create_fire_rearm_cancel(self):
+        tmp = tempfile.mkdtemp()
+        old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        old_arm, old_ri = bot._arm, bot.run_intent
+        rec, armed = [], []
+        bot._arm = lambda j: armed.append(j["id"])
+        bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
+                          or (True, "OK"))
+
+        async def fs(cid, msg, tag=""):
+            pass
+        old_ss = bot._send_safe
+        bot._send_safe = fs
+        try:
+            now = dt.datetime.now()
+            cmd = bot.parse_player("鬧鐘 每日0734 看待辦")
+            ack = bot._execute_player(cmd, 1, now)
+            self.assertIn("每日鬧鐘", ack)
+            job = bot._jobs()[0]
+            self.assertEqual((job["type"], job["daily"], job["hh"], job["mm"],
+                              job["label"]),
+                             ("bell", True, 7, 34, "看待辦"))
+            # 同 slot 再設 → 取代
+            cmd2 = bot.parse_player("鬧鐘 每日 0734 睇待辦清單")
+            bot._execute_player(cmd2, 1, now)
+            jobs = bot._jobs()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0]["label"], "睇待辦清單")
+            # 到點：1 秒計時器＋翻日再響（將 next 撥入過去模擬真到點）
+            rec.clear()
+            j0 = bot._jobs()[0]
+            j0["next"] = (dt.datetime.fromisoformat(j0["next"])
+                          - dt.timedelta(days=1)).isoformat()
+            bot._save_json(bot.JOBS_PATH, [j0])
+            asyncio.run(bot._fire_later(dict(j0), 0))
+            self.assertEqual(len(rec), 1)
+            self.assertIn("LENGTH 1", rec[-1])
+            self.assertIn("睇待辦清單", rec[-1])
+            left = bot._jobs()[0]
+            self.assertGreater(dt.datetime.fromisoformat(left["next"]),
+                               dt.datetime.now())
+            self.assertEqual(left["hh"], 7)
+            self.assertEqual(left["mm"], 34)
+            # 取消
+            self.assertTrue(bot._remove_job(left["id"]))
+            self.assertEqual(bot._jobs(), [])
+        finally:
+            bot.JOBS_PATH = old_j
+            bot._arm, bot.run_intent, bot._send_safe = old_arm, old_ri, old_ss
+            shutil.rmtree(tmp, ignore_errors=True)
