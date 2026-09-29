@@ -3669,12 +3669,19 @@ async def _say(text: str) -> None:
     text = (text or "").strip()
     if not text:
         return
-    try:
-        await asyncio.to_thread(
-            subprocess.run, ["termux-tts-speak", "-r", "0.9", text],   # 舊版 Termux:API 淨食短 option
-            timeout=30)
-    except Exception as exc:
-        log.warning("TTS 失敗：%s", str(exc)[:80])
+    # vivo 會背景清理 Termux:API——凍啟動＋引擎暖機可以超過 30 秒
+    # （2026-09-29 17:46 用戶實證四連 timeout，暖機後秒應）→ 90 秒＋重試一次
+    for attempt in (1, 2):
+        try:
+            await asyncio.to_thread(
+                subprocess.run,
+                ["termux-tts-speak", "-r", "0.9", text],   # 舊版淨食短 option
+                timeout=90)
+            log.info("TTS 已讀（第%s次）：%.30s", attempt, text)
+            return
+        except Exception as exc:
+            log.warning("TTS 第%s次失敗：%s", attempt, str(exc)[:100])
+    log.warning("TTS 兩次都失敗，放棄：%s", text[:40])
 
 
 def _acquire_singleton(path: str | None = None) -> bool:
