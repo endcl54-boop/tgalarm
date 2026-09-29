@@ -146,7 +146,7 @@ HELP = (
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
     "🌐 網頁：・網頁 新聞 https://…（儲）・開網頁 新聞　・0830 開網頁 新聞・每日 0900 開網頁 新聞\n"
-    "📋 待辦（自動置頂，撳按鈕打勾）：\n"
+    "🔒 封印（衝動防線）：封印 za 到 2026-10-15（開即閂＋讀你聽；到期自動解封）・解封 [名]\n📋 待辦（自動置頂，撳按鈕打勾）：\n"
     "・待辦 牛奶、交電費（加項目）　・待辦（睇清單）\n"
     "・完成 2　・未做 2　・刪 2　・清除已完成\n"
     "🧩 時間分配（到點自動連環計時）：\n"
@@ -536,6 +536,19 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.fullmatch(r"開\s+(\S.*)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("web", ref=m.group(1).strip())
+    # 封印（衝動消費防線）：封印 kw[,kw2] 到 YYYY-MM-DD／解封 [kw]／封印（清單）
+    m = re.fullmatch(r"封印\s+(.+?)\s+到\s+(\d{4})-(\d{1,2})-(\d{1,2})", s,
+                     re.IGNORECASE)
+    if m:
+        return PlayerCmd("seal_add", ref=m.group(1),
+                         url="%04d-%02d-%02d" % (int(m.group(2)),
+                                                 int(m.group(3)),
+                                                 int(m.group(4))))
+    m = re.fullmatch(r"解封(?:\s+(.+))?", s, re.IGNORECASE)
+    if m:
+        return PlayerCmd("seal_off", ref=(m.group(1) or "").strip())
+    if re.fullmatch(r"封印", s, re.IGNORECASE):
+        return PlayerCmd("seal_list")
     # 置頂待辦清單
     if re.fullmatch(r"(?:待辦|todo|todolist|清單)", s, re.IGNORECASE):
         return PlayerCmd("todo")
@@ -2147,6 +2160,8 @@ def _fmt_job_content(j: dict) -> str:
                 f"{j.get('label') or '時間到'}")
     if j.get("type") == "web":
         return f"開網頁「{j.get('label')}」"
+    if j.get("type") == "seal":
+        return "、".join(f"{x['label']}→{x['until']}" for x in j.get("apps", []))
     if j.get("type") == "nag":
         return f"每{(j.get('every') or 3600) // 60}分 {j.get('label', '')}"
     if j.get("type") == "focus":
@@ -2476,6 +2491,45 @@ async def _fire_later(job: dict, delay: float) -> None:
         for j in jobs:
             if j["id"] == job["id"]:
                 j["next"] = job["next"]
+        _save_json(JOBS_PATH, jobs)
+        _TASKS.pop(job["id"], None)
+        _arm(job)
+        return
+    elif jtype == "seal":
+        # 封印巡邏：25 秒一次前景偵測；命中→force-stop（死路→HOME）＋旁白
+        active = [x for x in job.get("apps", [])
+                  if x["until"] >= now.date().isoformat()]
+        expired = [x for x in job.get("apps", [])
+                   if x["until"] < now.date().isoformat()]
+        if expired:
+            await _send_safe(job["chat_id"],
+                             "🔓 到期解封：" + "、".join(x["label"] for x in expired),
+                             "封印")
+            await _say("解封喇")
+        if not active:
+            _TASKS.pop(job["id"], None)
+            _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+            return
+        fg = await asyncio.to_thread(_fg_pkg)
+        hit = next((x for x in active if fg and x["pkg"] == fg), None)
+        if hit:
+            ok2, _ = await asyncio.to_thread(
+                _shell_priv_exec, f"am force-stop {hit['pkg']}")
+            if not ok2:
+                await asyncio.to_thread(
+                    _shell_priv_exec, "input keyevent KEYCODE_HOME")
+            log.info("封印命中：%s（force-stop=%s）", hit["pkg"], ok2)
+            await _send_safe(job["chat_id"],
+                             f"🔒 封印緊「{hit['label']}」（到 {hit['until']}）"
+                             "——專注返正嘢",
+                             "封印")
+            await _say("封印緊，專注返正嘢")
+        job["next"] = (now + dt.timedelta(seconds=25)).isoformat()
+        jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+                j["apps"] = active
         _save_json(JOBS_PATH, jobs)
         _TASKS.pop(job["id"], None)
         _arm(job)
@@ -3371,6 +3425,86 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
             tag = f"開緊導航去「{shown}」（{_mode_label(mode)}）"
             return f"🧭 {tag}" + extra + ("（DRY_RUN）" if DRY_RUN else "")
         return "❌ 開唔到 Google Maps（有冇裝 Maps app？）：" + out[:150]
+    if a == "seal_list":
+        js = _seal_jobs()
+        if not js:
+            return "🔒 而家冇嘢被封印。例：封印 za 到 2026-10-15"
+        lines = ["🔒 封印中"]
+        for j in js:
+            for ap in j.get("apps", []):
+                lines.append(f"・{ap['label']} → {ap['until']}"
+                             f"{'（已過期）' if ap['until'] < now.date().isoformat() else ''}")
+        lines.append("（解封 [名] 提早開放；解封 全部）")
+        return "\n".join(lines)
+    if a == "seal_add":
+        if not _shell_priv_exec("true")[0]:
+            return ("❓ 封印要 rish／adb lane 先閂到人 app——入 Shizuku 撳「啟動」"
+                    "或者 send「復活Shizuku」再試")
+        kws = [k for k in re.split(r"[、，,;\s]+", cmd.ref) if k]
+        try:
+            until = dt.datetime.strptime(cmd.url, "%Y-%m-%d").date()
+        except ValueError:
+            return "❓ 日期格式：封印 za 到 2026-10-15"
+        if until < now.date():
+            return "❓ 個日子已經過咗喎"
+        found, missing = [], list(kws)
+        for kw in kws:
+            pkgs = _pkg_search(kw)
+            for p in pkgs:
+                found.append({"pkg": p, "label": p, "until": until.isoformat()})
+                if kw in missing:
+                    missing.remove(kw)
+        if not found:
+            return f"❓ 搾唔到 {cmd.ref} 呢個 app——試埋全名（pm list 嘅 package 字眼）"
+        job = next((j for j in _seal_jobs()), None)
+        if job:
+            jobs = _jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["apps"] = found + [x for x in j.get("apps", [])
+                                         if x["pkg"] not in
+                                         {f["pkg"] for f in found}]
+                    j["next"] = now.isoformat()
+            _save_json(JOBS_PATH, jobs)
+            _TASKS.pop(job["id"], None)
+            _arm(job)
+            jid = job["id"]
+        else:
+            nj = _add_simple_job(chat_id, {
+                "type": "seal", "apps": found, "chat_id": chat_id,
+                "hh": now.hour, "mm": now.minute, "next": now.isoformat(),
+                "label": "封印"})
+            jid = nj["id"]
+        msg = (f"🔒 封印生效（#{jid}）："
+               + "、".join(f"{f['label']}→{f['until']}" for f in found)
+               + "\n一開就即刻閂＋讀你聽；提早開放 send「解封 " + kws[0] + "」")
+        if missing:
+            msg += f"\n⚠️ 搾唔到：{('、'.join(missing))}"
+        return msg
+    if a == "seal_off":
+        js = _seal_jobs()
+        if not js:
+            return "而家冇嘢被封印。"
+        kws = [k for k in re.split(r"[、，,;\s]+", cmd.ref) if k]
+        removed, left_apps = [], []
+        for j in js:
+            for ap in j.get("apps", []):
+                if not kws or any(k.lower() in ap["pkg"].lower() for k in kws):
+                    removed.append(ap["label"])
+                else:
+                    left_apps.append(ap)
+        if not removed:
+            return f"❓ 封印名單入面冇 {cmd.ref}"
+        jobs = _jobs()
+        for j in jobs:
+            if j.get("type") == "seal":
+                if not left_apps:
+                    _remove_job(j["id"])
+                else:
+                    j["apps"] = left_apps
+        _save_json(JOBS_PATH, [j for j in _jobs()
+                               if j.get("type") != "seal" or j.get("apps")])
+        return "🔓 已解封：" + "、".join(removed)
     if a == "todo":
         _schedule_todo_refresh(chat_id)
         return _fmt_todos()
@@ -3693,6 +3827,43 @@ async def _say(text: str, delay: float = 0.0) -> None:
         except Exception as exc:
             log.warning("TTS 第%s次失敗：%s", attempt, str(exc)[:100])
     log.warning("TTS 兩次都失敗，放棄：%s", text[:40])
+
+
+def _fg_pkg() -> str:
+    """偵測前景 app package（dumpsys 兩式兜底）。失敗回空串。"""
+    ok, out = _shell_priv_exec(
+        "dumpsys activity activities | grep -E 'topResumedActivity|mResumedActivity' | head -2")
+    if not ok:
+        ok, out = _shell_priv_exec(
+            "dumpsys window windows | grep mCurrentFocus | head -1")
+    if ok and out:
+        m = re.search(r"u0\s+([\w.]+)/", str(out))
+        if m:
+            return m.group(1)
+        m = re.search(r"([\w.]+)/[\w.]*MainActivity", str(out))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _pkg_search(kw: str) -> list:
+    """關鍵字搾第三方 package（pm list packages -3）。"""
+    ok, out = _shell_priv_exec(
+        f"pm list packages -3 | grep -i {shlex.quote(kw)}")
+    if not ok:
+        return []
+    pkgs = []
+    for ln in str(out).splitlines():
+        ln = ln.strip()
+        if ln.startswith("package:"):
+            p = ln.split("package:", 1)[1].strip()
+            if p and p not in pkgs:
+                pkgs.append(p)
+    return pkgs[:8]
+
+
+def _seal_jobs() -> list:
+    return [j for j in _jobs() if j.get("type") == "seal"]
 
 
 def _acquire_singleton(path: str | None = None) -> bool:

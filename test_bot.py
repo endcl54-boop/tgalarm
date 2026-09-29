@@ -4006,3 +4006,89 @@ class TestTimerBellSpeaks(unittest.TestCase):
             bot.run_intent, bot._send_safe = old_ri, old_ss
             bot._say, bot.JOBS_PATH = old_say, old_j
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+class TestSeal(unittest.TestCase):
+    """封印（衝動消費防線）：封印 za 到日期——開即閂＋旁白；到期自動解封。"""
+
+    def _mock_lane(self, fg_pkg=""):
+        calls = []
+
+        def fake_exec(cmd):
+            calls.append(cmd)
+            if "force-stop" in cmd:
+                return (True, "")
+            if "grep" in cmd and fg_pkg:
+                return (True, "  topResumedActivity="
+                        f"ActivityRecord{{.. u0 {fg_pkg}/.ui.MainActivity ..}}")
+            if "packages -3" in cmd:
+                return (True, "package:com.zabank.mobile\n"
+                              "package:com.zabank.vendor")
+            return (True, "")
+        return calls, fake_exec
+
+    def test_seal_lifecycle(self):
+        tmp = tempfile.mkdtemp()
+        old_j, old_arm = bot.JOBS_PATH, bot._arm
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        bot._arm = lambda j: None
+        said = []
+
+        async def fs(cid, m, t=""):
+            pass
+
+        async def fk(t, delay=0):
+            said.append(t)
+        old_ss, old_say = bot._send_safe, bot._say
+        bot._send_safe = fs
+        bot._say = fk
+        calls, fake_exec = self._mock_lane()
+        old_exec = bot._shell_priv_exec
+        bot._shell_priv_exec = fake_exec
+        try:
+            now = dt.datetime.now()
+            r = bot._execute_player(
+                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
+            self.assertIn("封印生效", r)
+            job = bot._jobs()[0]
+            self.assertEqual(job["type"], "seal")
+            self.assertEqual({a["pkg"] for a in job["apps"]},
+                             {"com.zabank.mobile", "com.zabank.vendor"})
+            # 巡邏：冇開 app → 靜默 re-arm
+            asyncio.run(bot._fire_later(dict(job), 0))
+            job = bot._jobs()[0]
+            self.assertGreater(dt.datetime.fromisoformat(job["next"]), now)
+            # 巡邏：開緊 ZA → force-stop＋旁白
+            calls.clear(), said.clear()
+            calls2, fake_exec2 = self._mock_lane(fg_pkg="com.zabank.mobile")
+            bot._shell_priv_exec = fake_exec2
+            asyncio.run(bot._fire_later(dict(job), 0))
+            self.assertTrue(any("force-stop com.zabank.mobile" in c
+                                for c in calls2))
+            self.assertEqual(said, ["封印緊，專注返正嘢"])
+            # 過期 → 解封通知＋剷
+            stale = dict(bot._jobs()[0],
+                         apps=[{"pkg": "com.zabank.mobile",
+                                "label": "com.zabank.mobile",
+                                "until": "2020-01-01"}])
+            said.clear()
+            asyncio.run(bot._fire_later(stale, 0))
+            self.assertEqual(said[-1], "解封喇")
+            self.assertEqual(bot._jobs(), [])
+            # 提早解封
+            bot._shell_priv_exec = fake_exec
+            bot._execute_player(bot.parse_player("封印 za 到 2030-01-01"),
+                                1, now)
+            r = bot._execute_player(bot.parse_player("解封 za"), 1, now)
+            self.assertIn("已解封", r)
+            self.assertEqual(bot._jobs(), [])
+            # 冇 lane 提示
+            bot._shell_priv_exec = (lambda cmd: (False, "x"))
+            r = bot._execute_player(
+                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
+            self.assertIn("rish", r)
+        finally:
+            bot.JOBS_PATH, bot._arm, bot._send_safe = old_j, old_arm, old_ss
+            bot._say, bot._shell_priv_exec = old_say, old_exec
+            shutil.rmtree(tmp, ignore_errors=True)
