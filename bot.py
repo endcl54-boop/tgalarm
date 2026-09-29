@@ -3638,7 +3638,7 @@ async def _say(text: str) -> None:
         return
     try:
         await asyncio.to_thread(
-            subprocess.run, ["termux-tts-speak", "--rate", "0.9", text],
+            subprocess.run, ["termux-tts-speak", "-r", "0.9", text],   # 舊版 Termux:API 淨食短 option
             timeout=30)
     except Exception as exc:
         log.warning("TTS 失敗：%s", str(exc)[:80])
