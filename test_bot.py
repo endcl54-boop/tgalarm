@@ -4064,7 +4064,7 @@ class TestSeal(unittest.TestCase):
         try:
             now = dt.datetime.now()
             r = bot._execute_player(
-                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
+                bot.parse_player("封印 zabank 到 2030-01-01"), 1, now)
             self.assertIn("已停用", r)
             self.assertNotIn("巡邏中", r)
             job = bot._jobs()[0]
@@ -4082,7 +4082,7 @@ class TestSeal(unittest.TestCase):
             # 到期：pm enable 復活＋通知＋剷
             stale = dict(bot._jobs()[0],
                          apps=[{"pkg": "com.zabank.mobile",
-                                "label": "za", "until": "2020-01-01",
+                                "label": "zabank", "until": "2020-01-01",
                                 "mode": "disabled"}])
             calls.clear()
             said.clear()
@@ -4103,7 +4103,7 @@ class TestSeal(unittest.TestCase):
         try:
             now = dt.datetime.now()
             r = bot._execute_player(
-                bot.parse_player("封印 za 到 2030-01-01"), 1, now)
+                bot.parse_player("封印 zabank 到 2030-01-01"), 1, now)
             self.assertIn("巡邏中", r)
             job = bot._jobs()[0]
             self.assertEqual(job["apps"][0]["mode"], "patrol")
@@ -4117,7 +4117,7 @@ class TestSeal(unittest.TestCase):
             self.assertEqual(said, ["封印緊，專注返正嘢"])
             # 提早解封
             bot._shell_priv_exec = fake_exec
-            r = bot._execute_player(bot.parse_player("解封 za"), 1, now)
+            r = bot._execute_player(bot.parse_player("解封 zabank"), 1, now)
             self.assertIn("已解封", r)
             self.assertEqual(bot._jobs(), [])
         finally:

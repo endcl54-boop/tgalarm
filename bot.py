@@ -59,6 +59,7 @@ log = logging.getLogger("tgalarm")
 CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/config"))
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
 LOCK_PATH = os.path.expanduser(os.environ.get("TGALARM_LOCK", "~/.tgalarm/bot.lock"))
+SEAL_LAST_PATH = os.path.expanduser("~/.tgalarm/seal_last.json")
 TAKEAWAY_PATH = os.path.expanduser(
     os.environ.get("TGALARM_TAKEAWAY", "~/.tgalarm/takeaway.json"))
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
@@ -146,7 +147,7 @@ HELP = (
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
     "🌐 網頁：・網頁 新聞 https://…（儲）・開網頁 新聞　・0830 開網頁 新聞・每日 0900 開網頁 新聞\n"
-    "🔒 封印（衝動防線）：封印 za 到 2026-10-15（開即閂＋讀你聽；到期自動解封）・解封 [名]\n📋 待辦（自動置頂，撳按鈕打勾）：\n"
+    "🔒 封印（衝動防線）：封印 za 到 2026-10-15（停用，點入開唔到）・封印到1001（續封上次）・解封 [名]\n📋 待辦（自動置頂，撳按鈕打勾）：\n"
     "・待辦 牛奶、交電費（加項目）　・待辦（睇清單）\n"
     "・完成 2　・未做 2　・刪 2　・清除已完成\n"
     "🧩 時間分配（到點自動連環計時）：\n"
@@ -537,6 +538,27 @@ def parse_player(text: str) -> PlayerCmd | None:
     if m:
         return PlayerCmd("web", ref=m.group(1).strip())
     # 封印（衝動消費防線）：封印 kw[,kw2] 到 YYYY-MM-DD／解封 [kw]／封印（清單）
+    m = re.fullmatch(r"封印到\s*(?:(\d{4})-(\d{1,2})-(\d{1,2})"
+                     r"|(\d{1,2})-(\d{1,2})|(\d{4}))", s, re.IGNORECASE)
+    if m:
+        today = dt.date.today()
+        try:
+            if m.group(1):
+                d = dt.date(int(m.group(1)), int(m.group(2)),
+                            int(m.group(3)))
+            elif m.group(4):
+                d = dt.date(today.year, int(m.group(4)), int(m.group(5)))
+            else:
+                d = dt.date(today.year, int(m.group(6)[:2]),
+                            int(m.group(6)[2:]))
+        except ValueError:
+            return None
+        if d < today:
+            try:
+                d = d.replace(year=d.year + 1)
+            except ValueError:
+                d = d.replace(year=d.year + 4)
+        return PlayerCmd("seal_again", url=d.isoformat())
     m = re.fullmatch(r"封印\s+(.+?)\s+到\s+(\d{4})-(\d{1,2})-(\d{1,2})", s,
                      re.IGNORECASE)
     if m:
@@ -3453,6 +3475,10 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                              f"{'（已過期）' if ap['until'] < now.date().isoformat() else ''}")
         lines.append("（解封 [名] 提早開放；解封 全部）")
         return "\n".join(lines)
+    if a == "seal_again":
+        last = _load_json(SEAL_LAST_PATH, [])
+        cmd.ref = "、".join(last or ["za", "shacom"])
+        a = "seal_add"          # 續封上次組合（冇紀錄＝預設 za＋shacom）
     if a == "seal_add":
         if not _shell_priv_exec("true")[0]:
             return ("❓ 封印要 rish／adb lane 先閂到人 app——入 Shizuku 撳「啟動」"
@@ -3506,6 +3532,7 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                 "label": "封印"})
             jid = nj["id"]
         dis = sum(1 for f in found if f["mode"] == "disabled")
+        _save_json(SEAL_LAST_PATH, kws)
         msg = (f"🔒 封印生效（#{jid}）："
                + "、".join(f"{f['label']}→{f['until']}" for f in found)
                + (f"\n⛔ {dis} 個已停用（圖示變灰、點入開唔到）" if dis else "")
@@ -3886,19 +3913,32 @@ def _fg_pkg() -> str:
     return ""
 
 
+_PKG_ALIAS = {
+    # 常用短手→package（substring 搜唔到嘅都照封得到，2026-09-30）
+    "za": ["com.zhongan.ibank"],
+    "zhongan": ["com.zhongan.ibank"],
+    "shacom": ["com.shacom.android", "com.shacom.fps"],
+    "alipay": ["hk.alipay.wallet"],
+    "idlefish": ["com.taobao.idlefish"],
+    "octopus": ["com.octopuscards.nfc_reader"],
+    "sgame": ["com.tencent.tmgp.sgame"],
+}
+
+
 def _pkg_search(kw: str) -> list:
-    """關鍵字搾第三方 package（pm list packages -3）。"""
+    """關鍵字搾第三方 package（pm list grep）＋別名表直達。"""
+    pkgs = []
+    for alias_pkg in _PKG_ALIAS.get(kw.lower(), []):
+        pkgs.append(alias_pkg)
     ok, out = _shell_priv_exec(
         f"pm list packages -3 | grep -i {shlex.quote(kw)}")
-    if not ok:
-        return []
-    pkgs = []
-    for ln in str(out).splitlines():
-        ln = ln.strip()
-        if ln.startswith("package:"):
-            p = ln.split("package:", 1)[1].strip()
-            if p and p not in pkgs:
-                pkgs.append(p)
+    if ok:
+        for ln in str(out).splitlines():
+            ln = ln.strip()
+            if ln.startswith("package:"):
+                p = ln.split("package:", 1)[1].strip()
+                if p and p not in pkgs:
+                    pkgs.append(p)
     return pkgs[:8]
 
 
