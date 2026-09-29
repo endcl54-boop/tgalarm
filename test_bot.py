@@ -3426,7 +3426,45 @@ class TestShortForms(unittest.TestCase):
         self.assertEqual(m.group(1), "東京")
 
 
-class TestFiveFeatures(unittest.TestCase):
+class TestFocusPurgeOnRestore(unittest.TestCase):
+    """bashrc 復活場景：殘留 focus job 恢復時要剷——唔係無限疊計時器。"""
+
+    def test_stale_focus_purged_on_restore(self):
+        tmp = tempfile.mkdtemp()
+        old_j = bot.JOBS_PATH
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        old_arm = bot._arm
+        armed = []
+        bot._arm = lambda j: armed.append(j["id"])
+        try:
+            now = dt.datetime.now()
+            jobs = [
+                {"id": 1, "type": "focus", "wmin": 25, "bmin": 5,
+                 "phase": "work", "label": "", "chat_id": 1, "hh": 10,
+                 "mm": 0, "daily": False, "seconds": 0, "url": "",
+                 "shuffle": False, "paused": False,
+                 "next": (now - dt.timedelta(minutes=9)).isoformat()},
+                {"id": 2, "type": "play", "label": "lofi",
+                 "url": "https://x", "chat_id": 1, "hh": 7, "mm": 0,
+                 "daily": True, "seconds": 0, "shuffle": False,
+                 "paused": False,
+                 "next": bot._next_occurrence(now, 7, 0).isoformat()},
+            ]
+            with open(bot.JOBS_PATH, "w", encoding="utf-8") as f:
+                json.dump(jobs, f, ensure_ascii=False)
+            asyncio.run(bot._restore_jobs(None))
+            with open(bot.JOBS_PATH, encoding="utf-8") as f:
+                left = json.load(f)
+            self.assertEqual([j["type"] for j in left], ["play"])
+            self.assertIn(2, armed)
+            self.assertNotIn(1, armed)     # focus 冇再開火＝唔會疊計時器
+        finally:
+            bot.JOBS_PATH = old_j
+            bot._arm = old_arm
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestWaitWall(unittest.TestCase):
     """隨機擴展：倒數日／分組／習慣提醒／專注模式／電量守。"""
 
     def setUp(self):

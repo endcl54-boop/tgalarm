@@ -2826,6 +2826,14 @@ async def _restore_jobs(app) -> None:
                 job["idx"] = 0  # 分配鏈由頭嚟過
                 job["_rem"] = 0
             changed = True
+    # focus job 唔准過夜：phase 計時器已預先喺時鐘 app 行緊；
+    # bot 死過（超級省電/重啟）再恢復會即刻開火→再疊一個計時器
+    # （bashrc 復活循環下無限疊加——2026-09-29 用戶實證）
+    stale = [j for j in jobs if j.get("type") == "focus"]
+    if stale:
+        jobs = [j for j in jobs if j.get("type") != "focus"]
+        _save_json(JOBS_PATH, jobs)
+        log.info("已清除 %d 個殘留專注任務（計時器喺時鐘 app 照行）", len(stale))
     if changed:
         _save_json(JOBS_PATH, jobs)
     for job in jobs:
