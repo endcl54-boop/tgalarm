@@ -124,7 +124,7 @@ def _bind_owner(chat_id: int) -> None:
 HELP = (
     "🤖 指令格式：\n"
     "⏱ 計時器（直接落手機時鐘 app，系統自己響——深度睡眠都準時）：\n"
-    "・計時 25分鐘　・計時 1天12小時　・計時 90秒\n"
+    "・計時 25分鐘 攞集運（時鐘app響＋到點讀你聽；取消 N 淨刪語音）\n"
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
     "・外賣模式：打「外賣」開——所有計時提早 5 分鐘響；「外賣結束」收工\n"
@@ -2127,7 +2127,8 @@ def _fmt_job_content(j: dict) -> str:
     if j.get("type") == "weather":
         return "天氣簡報"
     if j.get("type") == "bell":
-        return f"響：{j.get('label') or '時間到'}"
+        pre = "語音提醒" if j.get("bell") == "timer" else "響"
+        return f"{pre}：{j.get('label') or '時間到'}"
     if j.get("type") == "series":
         return (f"每{(j.get('every') or 0) // 60}分鐘 "
                 f"{j['hh']:02d}:{j['mm']:02d}–{j.get('end_hh', 0):02d}:{j.get('end_mm', 0):02d} "
@@ -2234,12 +2235,17 @@ async def _fire_later(job: dict, delay: float) -> None:
         await _fire_alloc(job)
         return
     if jtype == "bell":
-        ok, info = await asyncio.to_thread(
-            run_intent, timer_intent_cmd(1, job.get("label", "")))
-        await _send_safe(job["chat_id"],
-                         (f"⏰ {job.get('label') or '時間到'}" if ok
-                          else f"❌ 響唔到（時鐘 app？）：{info[:120]}"),
-                         "鬧鐘/計時到點")
+        if job.get("bell") == "timer":      # 純語音提醒（用戶令 2026-09-29）
+            await _say(job.get("label") or "時間到")
+            await _send_safe(job["chat_id"],
+                             f"⏰ {job.get('label') or '時間到'}", "語音提醒")
+        else:                               # 鬧鐘後備：開 1 秒鐘保證有聲
+            ok, info = await asyncio.to_thread(
+                run_intent, timer_intent_cmd(1, job.get("label", "")))
+            await _send_safe(job["chat_id"],
+                             (f"⏰ {job.get('label') or '時間到'}" if ok
+                              else f"❌ 響唔到（時鐘 app？）：{info[:120]}"),
+                             "鬧鐘/計時到點")
         _TASKS.pop(job["id"], None)
         if job.get("daily"):
             job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
@@ -2323,6 +2329,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         return
     if jtype == "timer":
         ok, info = run_intent(timer_intent_cmd(job["seconds"], job.get("label", "")))
+        await _say(f"開始 {_speech_scrub(_fmt_job_content(job))}")
         how = _fmt_job_content(job)
     elif jtype == "nav":
         label = job.get("label") or job.get("url")
@@ -3410,18 +3417,18 @@ def _execute(p: Parsed, now: dt.datetime, chat_id: int = 0) -> str:
         day = day_label(p.fire_at, now)
         when = f"{p.fire_at:%H:%M}" if day == "今日" else f"{day} {p.fire_at:%H:%M}"
         if DRY_RUN:
-            return f"{adj}⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響{tail}"
-        # 2026-09-27 用戶決定：計時/鬧鐘直接落手機時鐘 app——系統級排程，
-        # 深度睡眠／Termux 凍結都準時，唔再靠 bot 瞓等。
-        # 手機計時器上限 99999 小時（用戶證實）＝MAX_TIMER_SECONDS，冇需另設 cap。
+            return f"{adj}⏱ 計時器 {fmt_duration(p.seconds)}{tag}，{when} 響＋到點讀你聽{tail}"
+        # 2026-09-29 用戶令：計時雙軌——時鐘 app（保證響，深睡都準）
+        # ＋bot 到點廣東話讀出標籤（bot 死都仲有鐘聲，生就連內容都讀）
         ok, info = run_intent(timer_intent_cmd(p.seconds, p.label))
+        job = _add_bell(chat_id, p.fire_at, p.label or "時間到", "timer")
         if ok:
-            return (f"{adj}⏱ 已落手機時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
-                    f"——{when} 響（app 自己倒數；深度睡眠都準時；取消喺時鐘 app）")
-        job = _add_bell(chat_id, p.fire_at, p.label, "timer")
-        return (f"{adj}⏱ 計時器 {fmt_duration(p.seconds)}{tag} → {when} 響"
-                f"（#{job['id']}，「取消 {job['id']}」可刪）"
-                f"（時鐘 app 設唔到：{info[:60]}——bot 排程守返）{tail}")
+            return (f"{adj}⏱ 已落時鐘 app：計時 {fmt_duration(p.seconds)}{tag}"
+                    f"——{when} 響＋到點讀你聽🔊"
+                    f"（#{job['id']} 淨撤語音；app 個喺 app 剷）{tail}")
+        return (f"{adj}🔊 時鐘 app 設唔到（{str(info)[:40]}）"
+                f"——語音提醒照排：{when} 讀你聽"
+                f"（#{job['id']}，「取消 {job['id']}」刪）{tail}")
     if DRY_RUN:
         return f"⏰ 鬧鐘 {day_label(p.fire_at, now)} {p.hour:02d}:{p.minute:02d}{tag}{tail}"
     ok, info = run_intent(alarm_intent_cmd(p.hour, p.minute, p.label))

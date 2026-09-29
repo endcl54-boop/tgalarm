@@ -360,7 +360,7 @@ class TestTimerCap(unittest.TestCase):
         finally:
             bot.run_intent = old
         self.assertNotIn("超過計時上限", r)
-        self.assertIn("已落手機時鐘", r)
+        self.assertIn("已落時鐘 app", r)
         self.assertIn(str(99999 * 3600), seen["cmd"])   # Int 裝得落
 
     def test_timer_goes_to_clock_app(self):
@@ -374,7 +374,7 @@ class TestTimerCap(unittest.TestCase):
             r = _execute(parse_command("計時 25分鐘 杯麵", NOW), NOW, chat_id=1)
         finally:
             bot.run_intent = old
-        self.assertIn("已落手機時鐘", r)
+        self.assertIn("已落時鐘 app", r)
         self.assertIn("SET_TIMER", seen["cmd"])
         self.assertIn("1500", seen["cmd"])
         self.assertIn("杯麵", seen["cmd"])
@@ -2708,6 +2708,7 @@ class TestBell(unittest.TestCase):
         self.assertEqual((job["hh"], job["mm"]), (7, 0))
 
     def test_fire_bell_rings_1s_and_removes(self):
+        """alarm bell（app 後備）＝開 1 秒鐘；timer bell＝語音讀（雙軌制）。"""
         sent, fired, removed = [], [], []
 
         async def fake_send(cid, text, label=""):
@@ -2715,7 +2716,13 @@ class TestBell(unittest.TestCase):
             return True
         bot.run_intent = lambda cmd: fired.append(cmd) or (True, "")
         bot._send_safe = fake_send
-        bot._jobs = lambda: [{"id": 9, "type": "bell", "bell": "timer",
+        said = []
+        old_say = bot._say
+
+        async def fake_say(t):
+            said.append(t)
+        bot._say = fake_say
+        bot._jobs = lambda: [{"id": 9, "type": "bell", "bell": "alarm",
                               "hh": 1, "mm": 2, "daily": False, "label": "杯麵",
                               "chat_id": 1, "next": dt.datetime.now().isoformat(),
                               "seconds": 0, "url": "", "shuffle": False,
@@ -2732,6 +2739,7 @@ class TestBell(unittest.TestCase):
         self.assertIn("杯麵", fired[0])                # 帶 label
         self.assertEqual(sent, ["⏰ 杯麵"])
         self.assertEqual(removed, [[]])               # 用完即刪
+        bot._say = old_say
 
     def test_bell_in_listing(self):
         s = bot._fmt_job_content({"type": "bell", "label": "杯麵"})
@@ -3787,7 +3795,7 @@ class TestDailyAlarm(unittest.TestCase):
             now = dt.datetime.now()
             ack = bot._execute_player(
                 bot.parse_player("鬧鐘 每日0734 看待辦"), 1, now)
-            self.assertIn("已落手機時鐘 app", ack)
+            self.assertIn("已落手機時鐘", ack)
             self.assertIn("日日", ack)
             self.assertIn("--eia", rec[-1])
             self.assertIn("android.intent.extra.alarm.DAYS 1,2,3,4,5,6,7",
@@ -3947,4 +3955,42 @@ class TestTTS(unittest.TestCase):
         finally:
             bot.JOBS_PATH, bot.run_intent = old_j, old_ri
             bot._send_safe, bot._say = old_ss, old_say
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+
+class TestTimerBellSpeaks(unittest.TestCase):
+    """計時雙軌：app 響＋bot 到點讀——timer bell fire＝_say＋TG 文字。"""
+
+    def test_timer_bell_speaks_label(self):
+        sent, fired = [], []
+
+        async def fake_send(cid, text, label=""):
+            sent.append(text)
+            return True
+        old_ri, old_ss, old_j = bot.run_intent, bot._send_safe, bot.JOBS_PATH
+        old_say = bot._say
+        bot.run_intent = lambda cmd: fired.append(cmd) or (True, "")
+        bot._send_safe = fake_send
+        said = []
+
+        async def fake_say(t):
+            said.append(t)
+        bot._say = fake_say
+        tmp = tempfile.mkdtemp()
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        try:
+            bot._save_json(bot.JOBS_PATH, [{
+                "id": 3, "type": "bell", "bell": "timer", "hh": 17,
+                "mm": 23, "daily": False, "label": "攞集運", "chat_id": 1,
+                "next": dt.datetime.now().isoformat(), "seconds": 0,
+                "url": "", "shuffle": False, "paused": False}])
+            asyncio.run(bot._fire_later(dict(bot._jobs()[0]), 0))
+            self.assertEqual(fired, [])            # 唔開計時器
+            self.assertEqual(said, ["攞集運"])     # 讀標籤
+            self.assertTrue(any("攞集運" in x for x in sent))
+            self.assertEqual(bot._jobs(), [])      # fire 完剷
+        finally:
+            bot.run_intent, bot._send_safe = old_ri, old_ss
+            bot._say, bot.JOBS_PATH = old_say, old_j
             shutil.rmtree(tmp, ignore_errors=True)
