@@ -3891,9 +3891,11 @@ class TestTTS(unittest.TestCase):
         bot.subprocess.run = fake_run
         try:
             asyncio.run(bot._say("測試一句"))
-            self.assertTrue(calls)
-            self.assertEqual(calls[0][0], "termux-tts-speak")
-            self.assertIn("測試一句", calls[0])
+            # 第一 call＝預熱 battery-status，第二 call＝tts 本體
+            self.assertGreaterEqual(len(calls), 2)
+            self.assertEqual(calls[0][0], "termux-battery-status")
+            self.assertEqual(calls[1][0], "termux-tts-speak")
+            self.assertIn("測試一句", calls[1])
         finally:
             bot.subprocess.run = old_run
 
