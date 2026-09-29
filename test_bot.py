@@ -3775,56 +3775,50 @@ class TestDailyAlarm(unittest.TestCase):
         p = bot.parse_player("每日 0900 計時 25分鐘")
         self.assertEqual(p.action, "sched_timer_daily")          # 每日計時
 
-    def test_create_fire_rearm_cancel(self):
+    def test_create_direct_in_app(self):
+        """用戶令：鬧鐘統一用手機 app——每日單鬧直接落循環鬧鐘，零 bot job。"""
         tmp = tempfile.mkdtemp()
         old_j = bot.JOBS_PATH
         bot.JOBS_PATH = os.path.join(tmp, "j.json")
-        old_arm, old_ri = bot._arm, bot.run_intent
-        rec, armed = [], []
-        bot._arm = lambda j: armed.append(j["id"])
+        old_ri, rec = bot.run_intent, []
         bot.run_intent = (lambda cmd: rec.append(" ".join(cmd))
                           or (True, "OK"))
-
-        async def fs(cid, msg, tag=""):
-            pass
-        old_ss = bot._send_safe
-        bot._send_safe = fs
         try:
             now = dt.datetime.now()
-            cmd = bot.parse_player("鬧鐘 每日0734 看待辦")
-            ack = bot._execute_player(cmd, 1, now)
-            self.assertIn("每日鬧鐘", ack)
-            job = bot._jobs()[0]
-            self.assertEqual((job["type"], job["daily"], job["hh"], job["mm"],
-                              job["label"]),
-                             ("bell", True, 7, 34, "看待辦"))
-            # 同 slot 再設 → 取代
-            cmd2 = bot.parse_player("鬧鐘 每日 0734 睇待辦清單")
-            bot._execute_player(cmd2, 1, now)
-            jobs = bot._jobs()
-            self.assertEqual(len(jobs), 1)
-            self.assertEqual(jobs[0]["label"], "睇待辦清單")
-            # 到點：1 秒計時器＋翻日再響（將 next 撥入過去模擬真到點）
-            rec.clear()
-            j0 = bot._jobs()[0]
-            j0["next"] = (dt.datetime.fromisoformat(j0["next"])
-                          - dt.timedelta(days=1)).isoformat()
-            bot._save_json(bot.JOBS_PATH, [j0])
-            asyncio.run(bot._fire_later(dict(j0), 0))
-            self.assertEqual(len(rec), 1)
-            self.assertIn("LENGTH 1", rec[-1])
-            self.assertIn("睇待辦清單", rec[-1])
-            left = bot._jobs()[0]
-            self.assertGreater(dt.datetime.fromisoformat(left["next"]),
-                               dt.datetime.now())
-            self.assertEqual(left["hh"], 7)
-            self.assertEqual(left["mm"], 34)
-            # 取消
-            self.assertTrue(bot._remove_job(left["id"]))
-            self.assertEqual(bot._jobs(), [])
+            ack = bot._execute_player(
+                bot.parse_player("鬧鐘 每日0734 看待辦"), 1, now)
+            self.assertIn("已落手機時鐘 app", ack)
+            self.assertIn("日日", ack)
+            self.assertIn("--eia", rec[-1])
+            self.assertIn("android.intent.extra.alarm.DAYS 1,2,3,4,5,6,7",
+                          rec[-1])
+            self.assertIn("MESSAGE 看待辦", rec[-1])
+            self.assertIn("HOUR 7", rec[-1])
+            self.assertEqual(bot._jobs(), [])     # 零 bot job
         finally:
+            bot.run_intent = old_ri
             bot.JOBS_PATH = old_j
-            bot._arm, bot.run_intent, bot._send_safe = old_arm, old_ri, old_ss
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fallback_bell_when_intent_fails(self):
+        """app 設唔到 → bot daily bell job 守返（原本行為）。"""
+        tmp = tempfile.mkdtemp()
+        old_j, old_arm, old_ri = bot.JOBS_PATH, bot._arm, bot.run_intent
+        bot.JOBS_PATH = os.path.join(tmp, "j.json")
+        bot._arm = lambda j: None
+        bot.run_intent = lambda cmd: (False, "SecurityException: x")
+        try:
+            now = dt.datetime.now()
+            ack = bot._execute_player(
+                bot.parse_player("鬧鐘 每日 0734 後備"), 1, now)
+            self.assertIn("bot 排程守返", ack)
+            jobs = [j for j in bot._jobs() if j["type"] == "bell"]
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual((jobs[0]["daily"], jobs[0]["hh"], jobs[0]["mm"],
+                              jobs[0]["label"]),
+                             (True, 7, 34, "後備"))
+        finally:
+            bot.JOBS_PATH, bot._arm, bot.run_intent = old_j, old_arm, old_ri
             shutil.rmtree(tmp, ignore_errors=True)
 
 

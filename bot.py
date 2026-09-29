@@ -686,14 +686,23 @@ def timer_intent_cmd(seconds: int, label: str) -> list:
     ]
 
 
-def alarm_intent_cmd(hour: int, minute: int, label: str) -> list:
-    return [
+def alarm_intent_cmd(hour: int, minute: int, label: str,
+                     days: list | None = None) -> list:
+    cmd = [
         "am", "start", "-a", "android.intent.action.SET_ALARM",
         "--ei", "android.intent.extra.alarm.HOUR", str(hour),
         "--ei", "android.intent.extra.alarm.MINUTES", str(minute),
         "--es", "android.intent.extra.alarm.MESSAGE", label or "Telegram 鬧鐘",
         "--ez", "android.intent.extra.alarm.SKIP_UI", "true" if SKIP_UI else "false",
     ]
+    if days:
+        # EXTRA_DAYS＝Calendar 整數陣列（1=週日…7=週六）——app 原生循環鬧鐘
+        cmd += ["--eia", "android.intent.extra.alarm.DAYS",
+                ",".join(str(d) for d in days)]
+    return cmd
+
+
+DAILY = [1, 2, 3, 4, 5, 6, 7]   # 日日
 
 
 def web_intent_cmd(url: str) -> list:
@@ -3095,11 +3104,18 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
                f"每{cmd.seconds // 60}分鐘 響「{job['label'] or '時間到'}」（共 {n} 響）")
         return msg + _replaced_note(replaced)
     if a == "sched_alarm_daily":
-        job, replaced = _add_job(cmd, chat_id, now)
+        lbl = cmd.ref or "時間到"
+        ok, info = run_intent(alarm_intent_cmd(cmd.hour, cmd.minute, lbl,
+                                               days=DAILY))
+        if ok:
+            return (f"⏰ 已落手機時鐘 app：每日 {cmd.hour:02d}:{cmd.minute:02d}"
+                    f" 響「{lbl}」——日日自動響，取消喺時鐘 app"
+                    "（重設同時間會疊多個，都喺 app 剷）")
+        job, replaced = _add_job(cmd, chat_id, now)   # app 設唔到 → bot 守返
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
         msg = (f"⏰ 每日鬧鐘（#{job['id']}）：日日 {cmd.hour:02d}:{cmd.minute:02d}"
-               f" 響「{job['label'] or '時間到'}」——下次 {when}；"
-               f"「取消 {job['id']}」刪")
+               f" 響「{lbl}」——下次 {when}；「取消 {job['id']}」刪"
+               f"（時鐘 app 設唔到：{str(info)[:60]}——bot 排程守返）")
         return msg + _replaced_note(replaced)
     if a in ("sched_timer", "sched_timer_daily"):
         job, replaced = _add_job(cmd, chat_id, now, seconds=cmd.seconds)
