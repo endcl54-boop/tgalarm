@@ -2248,11 +2248,11 @@ async def _fire_later(job: dict, delay: float) -> None:
         return
     if jtype == "bell":
         if job.get("bell") == "timer":      # 純語音提醒（用戶令 2026-09-29）
-            await _say(job.get("label") or "時間到")
+            await _say(job.get("label") or "時間到", delay=4)
             await _send_safe(job["chat_id"],
                              f"⏰ {job.get('label') or '時間到'}", "語音提醒")
         else:                               # 鬧鐘後備：開 1 秒鐘保證有聲
-            await _say(job.get("label") or "時間到")
+            await _say(job.get("label") or "時間到", delay=4)
             ok, info = await asyncio.to_thread(
                 run_intent, timer_intent_cmd(1, job.get("label", "")))
             await _send_safe(job["chat_id"],
@@ -2278,7 +2278,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         msg = (f"⏰ {job.get('label') or '時間到'}" if ok
                else f"❌ 響唔到（時鐘 app？）：{info[:120]}")
         await _send_safe(job["chat_id"], msg, "連環鬧")
-        await _say(job.get("label") or "時間到")
+        await _say(job.get("label") or "時間到", delay=4)
         fire_dt = dt.datetime.fromisoformat(job["next"])
         nxt = fire_dt + dt.timedelta(seconds=secs)
         we = job.get("window_end")
@@ -3664,11 +3664,16 @@ def _next_task_line(now: dt.datetime | None = None) -> str:
     return f"{_cjk_when(nxt, now)}，{content}"
 
 
-async def _say(text: str) -> None:
-    """termux-tts-speak（Termux:API）廣東話讀出——失敗靜靜記 log 唔阻任務。"""
+async def _say(text: str, delay: float = 0.0) -> None:
+    """termux-tts-speak（Termux:API）廣東話讀出——失敗靜靜記 log 唔阻任務。
+
+    ALARM 音訊流（同鐘聲同級，唔會畀通知靜音/DND 食咗）；delay＝避開
+    同一秒 1 秒鐘鐘聲（2026-09-29 20:15 實證：同秒雙聲，TTS 畀鐘聲冚到）。"""
     text = (text or "").strip()
     if not text:
         return
+    if delay:
+        await asyncio.sleep(delay)
     # vivo 會背景清理 Termux:API——凍啟動第一下會吊住（2026-09-29 實證）。
     # 預熱：先發個平價 API call 拉醒 termux-api process（生時 1-2 秒）
     try:
@@ -3681,7 +3686,7 @@ async def _say(text: str) -> None:
         try:
             await asyncio.to_thread(
                 subprocess.run,
-                ["termux-tts-speak", "-r", "0.9", text],   # 舊版淨食短 option
+                ["termux-tts-speak", "-r", "0.9", "-s", "ALARM", text],
                 timeout=90)
             log.info("TTS 已讀（第%s次）：%.30s", attempt, text)
             return

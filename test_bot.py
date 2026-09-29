@@ -2719,7 +2719,7 @@ class TestBell(unittest.TestCase):
         said = []
         old_say = bot._say
 
-        async def fake_say(t):
+        async def fake_say(t, delay=0):
             said.append(t)
         bot._say = fake_say
         bot._jobs = lambda: [{"id": 9, "type": "bell", "bell": "alarm",
@@ -3895,6 +3895,8 @@ class TestTTS(unittest.TestCase):
             self.assertGreaterEqual(len(calls), 2)
             self.assertEqual(calls[0][0], "termux-battery-status")
             self.assertEqual(calls[1][0], "termux-tts-speak")
+            self.assertIn("-s", calls[1])
+            self.assertIn("ALARM", calls[1])
             self.assertIn("測試一句", calls[1])
         finally:
             bot.subprocess.run = old_run
@@ -3943,7 +3945,7 @@ class TestTTS(unittest.TestCase):
         async def fs(cid, msg, tag=""):
             pass
 
-        async def fake_say(txt):
+        async def fake_say(txt, delay=0):
             said.append(txt)
         old_ss, old_say = bot._send_safe, bot._say
         bot._send_safe = fs
@@ -3984,7 +3986,7 @@ class TestTimerBellSpeaks(unittest.TestCase):
         bot._send_safe = fake_send
         said = []
 
-        async def fake_say(t):
+        async def fake_say(t, delay=0):
             said.append(t)
         bot._say = fake_say
         tmp = tempfile.mkdtemp()
