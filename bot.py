@@ -1842,6 +1842,18 @@ def _todo_clear_done() -> tuple:
     return n, len(keep)
 
 
+def _todo_speech() -> str:
+    """待辦清單→一句廣東話（打「待辦」時讀出）。"""
+    st = _todos()
+    if not st["items"]:
+        return "待辦清單空晒"
+    open_items = [it["text"] for it in st["items"] if not it.get("done")]
+    if not open_items:
+        return "待辦清單全清，好嘢"
+    return (f"待辦清單，{len(open_items)} 項未完成："
+            + "、".join(_speech_scrub(x) for x in open_items))
+
+
 def _fmt_todos() -> str:
     st = _todos()
     items = st["items"]
@@ -3571,6 +3583,8 @@ async def _on_message(update, context):
     for ln, p in items:
         if isinstance(p, PlayerCmd):
             results.append(_execute_player(p, update.effective_chat.id, now))
+            if p.action == "todo":
+                asyncio.create_task(_say(_todo_speech()))
         elif p:
             results.append(_execute(p, now, update.effective_chat.id))
         else:
