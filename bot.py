@@ -88,6 +88,7 @@ def _read_config_file() -> dict:
 
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or _read_config_file().get("BOT_TOKEN", "").strip()
+GAS_URL = os.environ.get("GAS_URL", "").strip() or _read_config_file().get("GAS_URL", "").strip()
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1" or "--dry-run" in sys.argv
 SKIP_UI = (os.environ.get("SKIP_UI") or _read_config_file().get("SKIP_UI", "1")) != "0"
 
@@ -161,6 +162,7 @@ HELP = (
     "\n🎲 骰仔（骰仔 20）　🎯 揀 飲茶/壽司/拉麵　🔐 密碼 16　💪 打氣"
     "🎲 大話骰：「大話」開枱，3個4 叫牌，「開！」攤牌；起手 3個起／齋2個起／叫1即齋；計分制「3個4齋」齋叫「劈」雙倍"
     "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
+    "\n💰 可花：「可花」查今日可花（出糧夠唔夠）"
 )
 
 # ---------------- 指令解析 ----------------
@@ -1543,6 +1545,47 @@ def _weather_report() -> tuple:
         return True, "\n".join(lines)
     except (KeyError, IndexError, TypeError, ValueError) as e:
         return False, f"天氣資料格式唔啱：{e}"
+
+
+def _payday_fmt(iso) -> str:
+    """2026-10-05 → 10月5日；唔係 ISO 就原樣返（空就空）。"""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", str(iso or ""))
+    if not m:
+        return str(iso or "").strip()
+    return f"{int(m.group(2))}月{int(m.group(3))}日"
+
+
+def _payday_report() -> tuple:
+    """GAS「出糧夠唔夠」Web App（?api=json）攞今日可花。
+
+    Server（PaydayLib.dispatch op=view）持 canonical state，呢下係唯讀：
+    唔傳 hintSeen/confirmSeen，rememberFlags 就唔會寫任何嘢。
+    回傳 (ok, 文字)。"""
+    import urllib.request
+    if not GAS_URL:
+        return False, "未設定 GAS_URL（~/.tgalarm/config 加 GAS_URL=<出糧 app /exec URL>）"
+    url = GAS_URL + ("&" if "?" in GAS_URL else "?") + "api=json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "tgalarm/1.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:  # noqa: BLE001
+        return False, f"GAS 連唔到：{e}"
+    disp = data.get("display") or {}
+    if not disp or disp.get("mode") == "setup":
+        return False, str(data.get("error") or "app 未設定（mode=setup）")
+    tone = str(disp.get("tone") or "")
+    hero = str(disp.get("hero") or "?")
+    lines = [f"今日可花 {hero}" if tone != "blocked" else "今日未有許可"]
+    if disp.get("trust"):
+        lines.append(str(disp["trust"]))
+    payday = _payday_fmt(data.get("payday"))
+    if payday:
+        lines.append(f"下次出糧：{payday}")
+    if disp.get("warning"):
+        lines.append("⚠️ " + str(disp["warning"]))
+    lines.append(str(disp.get("sub") or "上限，唔係目標。"))
+    return True, "\n".join(lines)
 
 
 # ---- 大話骰（liar.py 引擎：數學層+神經網絡，純本地 <1ms）----
@@ -3728,6 +3771,19 @@ async def _on_message(update, context):
         wok, rep = await asyncio.to_thread(_weather_report)
         await update.message.reply_text(("🌤 " + rep) if wok
                                         else f"❌ 天氣攞唔到：{rep[:150]}")
+        return
+    if t in ("可花", "出糧", "使幾多") or t.startswith("可花 "):
+        await update.message.reply_text("💰 查緊今日可花…")
+        pok, prep = await asyncio.to_thread(_payday_report)
+        if pok:
+            await update.message.reply_text("💰 " + prep)
+            head = prep.splitlines()[0]
+            mh = re.search(r"\$([\d,]+)", head)
+            spoken = (f"今日可花{mh.group(1).replace(',', '')}蚊"
+                      if mh else _speech_scrub(head)[:60])
+            await _say(spoken)
+        else:
+            await update.message.reply_text(f"❌ 可花攞唔到：{prep[:150]}")
         return
     m = re.fullmatch(r"(骰仔|dice)(?:\s+(\d{1,3}))?", t, re.IGNORECASE)
     if m:
