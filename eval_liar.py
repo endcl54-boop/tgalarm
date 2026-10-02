@@ -1,11 +1,9 @@
-# -*- coding: utf-8 -*-
 """大話骰評估台：現役引擎 vs 三種模擬對手（誠實數學／吹水佬／狂徒）。
 
 對手同引擎用同一個 decide API（隱藏資訊對稱：對手只知自己骰＋叫牌史；
 攤牌時對家骰隨機补——同真實期望一致）。輸出勝率。
 """
 import random
-import sys
 
 import liar
 

@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 """bot.py 指令解析 + Intent 生成嘅單元測試（唔使 Telegram、唔使 Android 都行到）"""
 import asyncio
-import time
 import datetime as dt
 import json
 import os
@@ -9,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -334,7 +333,7 @@ class TestTimerCap(unittest.TestCase):
 
     def setUp(self):
         self._jobs, self._save, self._arm = bot._jobs, bot._save_json, bot._arm
-        bot._jobs = lambda: []
+        bot._jobs = list
         bot._save_json = lambda p, d: None
         bot._arm = lambda j: None
 
@@ -464,7 +463,7 @@ class TestTimerCap(unittest.TestCase):
 
     def test_takeaway_jobs_line(self):
         old_jobs, old_save = bot._jobs, bot._save_json
-        bot._jobs = lambda: []
+        bot._jobs = list
         bot._save_json = lambda p, d: None
         try:
             bot._TAKEAWAY["on"] = True
@@ -942,7 +941,7 @@ class TestDestinations(unittest.TestCase):
     def test_edit_nav_job_content(self):
         self._ex("每日 0800 導航 沙田站")
         jid = bot._load_json(bot.JOBS_PATH, [])[0]["id"]
-        ok, info = bot._edit_job(jid, "荃灣西站 步行", self.now)
+        ok, _info = bot._edit_job(jid, "荃灣西站 步行", self.now)
         self.assertTrue(ok)
         job = bot._load_json(bot.JOBS_PATH, [])[0]
         self.assertEqual((job["url"], job["mode"], job["label"]), ("荃灣西站", "w", "荃灣西站"))
@@ -1002,7 +1001,7 @@ class TestStopChainLayers(unittest.TestCase):
 
     def test_all_layers_fail(self):
         bot.run_intent = lambda cmd, t=0: (False, "denied")
-        ok, how = bot._stop()
+        ok, _how = bot._stop()
         self.assertFalse(ok)
 
 
@@ -1135,7 +1134,7 @@ class TestAlloc(unittest.TestCase):
         self.assertTrue(all(s["seconds"] % 60 == 0 and s["seconds"] >= 60 for s in segs))
 
     def test_segments_equal(self):
-        segs, err = bot._alloc_segments("A、B", 0, 3600)
+        segs, _err = bot._alloc_segments("A、B", 0, 3600)
         self.assertEqual([s["seconds"] for s in segs], [1800, 1800])
 
     def test_segments_too_tight_and_bad_buf(self):
@@ -1846,7 +1845,7 @@ class TestAllocAdvance(unittest.TestCase):
 
     # ── 中段快進 ──
     def test_mid_stage_advances(self):
-        job = self._mk_alloc()                 # 巡樓進行中，仲淨 15 分鐘
+        self._mk_alloc()                 # 巡樓進行中，仲淨 15 分鐘
         r = self._done()
         self.assertIn("提早完成「巡樓」", r)
         self.assertIn("慳返 15分鐘", r)
@@ -1865,7 +1864,7 @@ class TestAllocAdvance(unittest.TestCase):
 
     # ── 最後段收工 ──
     def test_last_stage_finishes_once_off(self):
-        job = self._mk_alloc(idx=2)            # 發相（最後段）進行中
+        self._mk_alloc(idx=2)            # 發相（最後段）進行中
         r = self._done()
         self.assertIn("提早收工", r)
         self.assertIn("已刪走", r)
@@ -1873,7 +1872,7 @@ class TestAllocAdvance(unittest.TestCase):
         self.assertNotIn(7, bot._TASKS)
 
     def test_last_stage_daily_rearms_tomorrow(self):
-        job = self._mk_alloc(idx=2, daily=True)
+        self._mk_alloc(idx=2, daily=True)
         r = self._done()
         self.assertIn("提早收工", r)
         self.assertIn("每日", r)
@@ -2067,7 +2066,7 @@ class TestNavFallback(unittest.TestCase):
         self.assertIn("travelmode=transit", calls[2][-1])
 
     def test_all_fail_reports_last_error(self):
-        calls, run = self._stub([False, False, False])
+        _calls, run = self._stub([False, False, False])
         old = bot.run_intent
         bot.run_intent = run
         try:
@@ -2213,7 +2212,7 @@ class TestNavFireRishWarning(unittest.TestCase):
             sent.append(text)
             return True
         bot._send_safe = fake_send
-        bot._jobs = lambda: []
+        bot._jobs = list
         bot._save_json = lambda *a, **k: None
         bot.run_intent = lambda cmd, t=0: (True, "")
         bot._RISH_CACHE.update({"t": 1e18, "ok": True})  # 舊 cache 話 ok，都要重探
@@ -2242,7 +2241,7 @@ class TestNavFireRishWarning(unittest.TestCase):
             sent.append(text)
             return True
         bot._send_safe = fake_send
-        bot._jobs = lambda: []
+        bot._jobs = list
         bot._save_json = lambda *a, **k: None
         calls = []
         bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "ok")
@@ -2265,7 +2264,7 @@ class TestNavFireRishWarning(unittest.TestCase):
             sent.append(text)
             return True
         bot._send_safe = fake_send
-        bot._jobs = lambda: []
+        bot._jobs = list
         bot._save_json = lambda *a, **k: None
         calls = []
         bot.run_intent = lambda cmd, t=0: calls.append(cmd) or (True, "ok")
@@ -2315,7 +2314,7 @@ class TestNavConfirmNotify(unittest.TestCase):
             captured["cmd"] = cmd
             return mock.Mock(returncode=0, stdout="", stderr="")
         bot.subprocess.run = fake_run
-        ok, out = bot._nav_confirm_notify(self._job())
+        ok, _out = bot._nav_confirm_notify(self._job())
         self.assertTrue(ok)
         cmd = captured["cmd"]
         self.assertEqual(cmd[0], "termux-notification")
@@ -2811,7 +2810,7 @@ class TestBell(unittest.TestCase):
         bot.run_intent, bot._send_safe = self._intent, self._send
 
     def test_alarm_creates_bell_job(self):
-        bot._jobs = lambda: []
+        bot._jobs = list
         saved = []
         bot._save_json = lambda p, d: saved.append(d)
         bot._arm = lambda j: None
@@ -2873,7 +2872,7 @@ class TestSeries(unittest.TestCase):
         self._jobs = bot._jobs
         self._intent = bot.run_intent
         self._send = bot._send_safe
-        bot._jobs = lambda: []
+        bot._jobs = list
         saved = []
         bot._save_json = lambda p, d: saved.append(d)
         bot._arm = lambda j: None
@@ -2911,7 +2910,6 @@ class TestSeries(unittest.TestCase):
         self.assertIn("09:00–10:30", r)
         self.assertIn("每30分鐘", r)
         self.assertIn("共 4 響", r)     # 9:00,9:30,10:00,10:30
-        job = bot._save_json.__self__ if False else None
 
     def test_fire_advances_within_window(self):
         start = (dt.datetime.now() + dt.timedelta(minutes=1)).replace(
@@ -2994,7 +2992,7 @@ class TestSeries(unittest.TestCase):
         # Frankie 原句：兩行＋過午夜
         res = bot.parse_lines("計時 2100-0000\n\n每60分鐘 報更")
         self.assertEqual(len(res), 1)
-        ln, p = res[0]
+        _ln, p = res[0]
         self.assertEqual(p.action, "series")
         self.assertEqual((p.hour, p.minute, p.hour2, p.minute2), (21, 0, 0, 0))
         self.assertEqual(p.seconds, 3600)
@@ -3137,7 +3135,7 @@ class TestNavKeyboard(unittest.TestCase):
                 edited.append(t)
         q = Q()
         upd = type("U", (), {"callback_query": q})()
-        bot._jobs = lambda: []
+        bot._jobs = list
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(bot._on_nav_callback(upd, None))
@@ -3372,7 +3370,7 @@ class TestNavDialogTask(unittest.TestCase):
         old_send, old_jobs, old_save, old_dry = (bot._send_safe, bot._jobs,
                                                  bot._save_json, bot.DRY_RUN)
         old_kb = bot._nav_keyboard_msg
-        bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = fake_send, lambda: [], (lambda *a, **k: None), False
+        bot._send_safe, bot._jobs, bot._save_json, bot.DRY_RUN = fake_send, list, (lambda *a, **k: None), False
         try:
             nxt = (dt.datetime.now() + dt.timedelta(seconds=1)).isoformat()
             job = {"id": 42, "type": "nav", "hh": 7, "mm": 0, "daily": False,
@@ -3652,7 +3650,6 @@ class TestWaitWall(unittest.TestCase):
         self.assertIsNone(bot._groups_handle("唔係分組"))
 
     def test_nag_job_and_fire(self):
-        now = dt.datetime.now()
         r = bot._nag_handle("提醒 每60分 飲水", 1)
         self.assertIn("每 60 分鐘", r)
         jobs = bot._jobs()
@@ -3729,7 +3726,6 @@ class TestWaitWall(unittest.TestCase):
                           if j.get("type") == "focus"], [])
 
     def test_battery_guard(self):
-        now = dt.datetime.now()
         r = bot._battery_handle("電量守 20", 1)
         self.assertIn("電量守開工", r)
         job = bot._jobs()[0]
@@ -4142,11 +4138,11 @@ class TestSeal(unittest.TestCase):
             if "force-stop" in cmd:
                 return (True, "")
             if "grep" in cmd and fg_pkg:
-                return (True, "  topResumedActivity="
-                        f"ActivityRecord{{.. u0 {fg_pkg}/.ui.MainActivity ..}}")
+                return (True, ("  topResumedActivity="
+                        f"ActivityRecord{{.. u0 {fg_pkg}/.ui.MainActivity ..}}"))
             if "packages -3" in cmd:
-                return (True, "package:com.zabank.mobile\n"
-                              "package:com.zabank.vendor")
+                return (True, ("package:com.zabank.mobile\n"
+                              "package:com.zabank.vendor"))
             return (True, "")
         return calls, fake_exec
 
@@ -4216,7 +4212,7 @@ class TestSeal(unittest.TestCase):
         """pm 死：巡邏模式——命中 force-stop＋旁白；提早解封照覆。"""
         tmp = tempfile.mkdtemp()
         said, olds = self._setup(tmp)
-        calls, fake_exec = self._mock_lane(disable_ok=False)
+        _calls, fake_exec = self._mock_lane(disable_ok=False)
         bot._shell_priv_exec = fake_exec
         try:
             now = dt.datetime.now()

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """大話骰（Dudo／Perudo，港式完整版）1v1 引擎。
 
 規則（2026-09-26 用戶提供完整版＋計分制）：
@@ -219,8 +218,6 @@ def decide(dice, n_total: int, cur, opp=None, jai_mode: bool = False):
     n_unk = n_total - my_n
     bluff = float((opp or {}).get("bluff", 0.0))
     u_bids = int((opp or {}).get("bids", 0))
-    calls = float((opp or {}).get("calls", 0.0))
-    folds = float((opp or {}).get("folds", 0.0))
     if cur and len(cur) == 2:
         cur = (cur[0], cur[1], False)
     if u_bids >= 2:
@@ -329,7 +326,6 @@ def user_bid(st, q: int, f: int, jai: bool = False):
                 f"（例：3個4／2個5齋／2個1齋）")
     if st.get("jai"):
         jai = True                            # 齋一開，round 全齋
-    n_total = st["you_n"] + st["bot_n"]
     if st["bid"] and bid_rank(q, f, jai) <= bid_rank(*st["bid"]):
         return (f"要叫大過「{bid_text(*st['bid'])}」先得"
                 f"（1 百搭；叫1即齋；齋版大過非齋；同數量入面 1 最大）。")

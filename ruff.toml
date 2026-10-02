@@ -1,0 +1,24 @@
+# ruff 政策（2026-10-02 全碼掃描後制定）
+# 安全類（F/I/UP009/ISC004/PIE807/PIE810/PERF402/RUF007/RUF059/ASYNC221）已全修。
+# 以下為「設計如此」嘅豁免，逐項有理由，唔好無腦翻案：
+[lint]
+ignore = [
+  # 全 bot 用香港本地 naive datetime（機上 TZ=Asia/Hong_Kong；統一轉 aware 係行為改動，唔係格式修復）
+  "DTZ001", "DTZ005", "DTZ006", "DTZ007", "DTZ011",
+  # try-except-pass 係生存設計：TTS/intent/通知失敗唔准阻任務（多處已註釋）
+  "S110",
+  # blind except 同上——生存優先，出事靜靜 log
+  "BLE001",
+  # subprocess check=False 刻意：returncode 自行處理（intent 後備鏈要分檢）
+  "PLW1510",
+  # sysfs/設定檔一次性微讀（.read() 即丟，CPython 即刻收 fd）；轉 with 19 處純噪音
+  "SIM115",
+  # root logger 係 bot 全檔慣例（logging.info 直用）
+  "LOG015",
+  # test fixture 慣用 mutable class attr（payload 樣板）
+  "RUF012",
+  # 以 `python bot.py` 行，唔靠 shebang bit
+  "EXE001",
+  # 一處 %04d printf；轉 f-string 純風格
+  "UP031",
+]

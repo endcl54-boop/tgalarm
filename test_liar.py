@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 """大話骰引擎測試：數學對 brute force、合法性、NN 推理、速度、全流程。"""
-import asyncio
 import random
 import tempfile
 import time
 import unittest
+from itertools import pairwise
 
 import bot
 import liar
@@ -76,7 +75,7 @@ class TestLiarBids(unittest.TestCase):
     def test_legal_raises_chain(self):
         seq = [(2, 4, False), (2, 5, False), (2, 6, False), (2, 1, False),
                (3, 2, False), (3, 4, True), (4, 6, True), (4, 1, True)]
-        for a, b in zip(seq, seq[1:]):
+        for a, b in pairwise(seq):
             self.assertLess(liar.bid_rank(*a), liar.bid_rank(*b),
                             f"{a} 應細過 {b}")
         # 齋 mode：產出全部齋
@@ -88,15 +87,15 @@ class TestLiarEngine(unittest.TestCase):
     """動作槽遮罩＋decide 合法性 fuzz＋速度。"""
 
     def test_masks(self):
-        slots, mask = liar.action_slots([2, 2, 5, 1, 6], 10, None)
+        _slots, mask = liar.action_slots([2, 2, 5, 1, 6], 10, None)
         self.assertEqual(mask[0], 0)                       # 開局冇得開
         self.assertGreaterEqual(sum(mask), 3)              # 有得叫
         # 必開：對家叫晒成牆
-        slots2, mask2 = liar.action_slots([2, 3, 5, 1, 6], 10, (10, 6))
+        _slots2, mask2 = liar.action_slots([2, 3, 5, 1, 6], 10, (10, 6))
         self.assertEqual(sum(mask2), 1)
         self.assertEqual(mask2[0], 1)
         # 咁真唔准開：我手已經自己夠
-        slots3, mask3 = liar.action_slots([4, 4, 4, 1, 1], 10, (4, 4))
+        _slots3, mask3 = liar.action_slots([4, 4, 4, 1, 1], 10, (4, 4))
         self.assertEqual(mask3[0], 0)                      # 5+? 至少4→P高
         self.assertGreaterEqual(sum(mask3), 1)
 
@@ -338,7 +337,7 @@ class TestJaiPai(unittest.TestCase):
         st = liar.new_game(starter="you")
         st["bot"] = [2, 2, 5, 5, 3]     # 對 4 完全冇貢獻，冇底氣
         st["bid"], st["bidder"], st["turn"] = (2, 4, False), "bot", "you"
-        r = liar.user_challenge(st, stake=2)
+        liar.user_challenge(st, stake=2)
         self.assertEqual(st["stake"], 2)    # 唔敢反劈
         rep, _ = liar.user_dice_declare(st, "我 5 5 5 5 5")
         self.assertIn("注 2 分", rep)

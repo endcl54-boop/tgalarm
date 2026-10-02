@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """大話骰 NN 訓練（沙盒跑，唔使手機）：
 
 1. 教師＝數學引擎（binomial tail 門檻策略）喺隨機狀態出標籤
@@ -8,10 +7,7 @@
 
 用法：python3 train_liar.py
 """
-import math
 import random
-import secrets
-import sys
 
 import numpy as np
 
@@ -147,7 +143,7 @@ def train():
 
     def nn_act(dice, n_total, cur):
         slots, mask = liar.action_slots(dice, n_total, cur)
-        H, P = forward_np(np.array([features(dice, n_total, cur)]),
+        _H, P = forward_np(np.array([features(dice, n_total, cur)]),
                           W1, B1, W2, B2)
         pr = P[0]
         best, bi = -1, -1

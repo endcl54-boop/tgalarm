@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 tgalarm — Telegram 鬧鐘・計時器機械人（Android Termux 直連系統時鐘）
 
@@ -43,8 +42,8 @@ import datetime as dt
 import fcntl
 import json
 import logging
-import random
 import os
+import random
 import re
 import shlex
 import shutil
@@ -768,7 +767,7 @@ def run_intent(cmd: list, timeout: float = 10.0) -> tuple:
         return False, "系統開時鐘 App 超時（電話太攰），請再試一次"
     except FileNotFoundError:
         return False, "搵唔到 `am` 指令 —— 呢個 bot 要喺 Android Termux 行"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
 
 
@@ -872,7 +871,7 @@ def _battery_status() -> tuple:
         except Exception:
             temp = None
         return pct, chg, temp
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return None, None, str(e)
 
 
@@ -1040,7 +1039,7 @@ def _focus_handle(t: str, chat_id: int):
         _remove_job(j["id"])
     # 唔預落（用戶否決 2026-09-29）：job next=now，即刻 fire 落第一個鐘
     now = dt.datetime.now()
-    job = _add_simple_job(chat_id, {
+    _add_simple_job(chat_id, {
         "type": "focus", "wmin": wmin, "bmin": bmin,
         "session_start": now.isoformat(),
         "label": label, "chat_id": chat_id,
@@ -1140,7 +1139,7 @@ def _rish_probe() -> bool:
     try:
         r = subprocess.run(["rish", "-c", "id"], capture_output=True, text=True, timeout=10)
         return r.returncode == 0 and "uid=2000" in (r.stdout + r.stderr)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -1174,7 +1173,7 @@ def _adb_shell(shell_cmd: str, timeout: int = 10) -> tuple:
         return r.returncode == 0, out
     except subprocess.TimeoutExpired:
         return False, "adb shell 超時"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
 
 
@@ -1189,7 +1188,7 @@ def _adb_lane_probe() -> bool:
     try:
         subprocess.run([adb, "connect", ADB_TARGET], capture_output=True,
                        text=True, timeout=8)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     ok, out = _adb_shell("id")
     return ok and "uid=2000" in out
@@ -1294,7 +1293,7 @@ def _nav_confirm_notify(job: dict) -> tuple:
         return r.returncode == 0, out or "ok"
     except subprocess.TimeoutExpired:
         return False, "termux-notification 超時"
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
 
 
@@ -1310,7 +1309,7 @@ def _nav_dialog_block(job: dict, timeout: int = 600) -> str:
                            capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return "timeout"
-    except Exception:  # noqa: BLE001
+    except Exception:
         return "err"
     out = (r.stdout or "")
     if '"yes"' in out:
@@ -1328,12 +1327,12 @@ def _nav_run_go(job: dict) -> None:
     script = _nav_go_script_path(job)
     try:
         subprocess.run(["sh", script], capture_output=True, timeout=30)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     try:
         subprocess.run(["termux-notification-remove", f"nav{job.get('id', 0)}"],
                        capture_output=True, timeout=6)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
@@ -1373,7 +1372,7 @@ async def _on_nav_callback(update, context) -> None:
     q = update.callback_query
     try:
         await q.answer()
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     try:
         _, act, nid = q.data.split(":", 2)
@@ -1391,7 +1390,7 @@ async def _on_nav_callback(update, context) -> None:
             await q.edit_message_text(
                 "\u23f1 \u5462\u500b\u78ba\u8a8d\u5df2\u904e\u671f\uff0c"
                 "send\u300c\u5c0e\u822a <\u5730\u65b9>\u300d\u518d\u4fc2\u904e")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return
     if act == "go":
@@ -1399,18 +1398,19 @@ async def _on_nav_callback(update, context) -> None:
         try:
             await q.edit_message_text(
                 f"\U0001F5FA \u5df2\u958b\u5730\u5716\u53bb\u300c{job.get('label')}\u300d")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     else:
         try:
-            subprocess.run(["termux-notification-remove", f"nav{job.get('id', 0)}"],
-                           capture_output=True, timeout=6)
-        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(
+                subprocess.run, ["termux-notification-remove", f"nav{job.get('id', 0)}"],
+                capture_output=True, timeout=6)
+        except Exception:
             pass
         try:
             await q.edit_message_text(
                 "\u2702\u6536\u5de5\uff0c\u5187\u958b\u5730\u5716")
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     _PENDING_NAVS.pop(nid, None)
 
@@ -1422,7 +1422,7 @@ async def _nav_dialog_task(job: dict) -> None:
     loop = asyncio.get_event_loop()
     try:
         ans = await loop.run_in_executor(None, _nav_dialog_block, job)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return
     if ans == "err":
         # 好可能啱啱俾通知橫額搶咗焦點——2 秒後重彈一次
@@ -1430,7 +1430,7 @@ async def _nav_dialog_task(job: dict) -> None:
         await asyncio.sleep(2)
         try:
             ans = await loop.run_in_executor(None, _nav_dialog_block, job)
-        except Exception:  # noqa: BLE001
+        except Exception:
             return
     nid = f"nav{job.get('id', 0)}"
     label = job.get("label") or job.get("url", "")
@@ -1439,9 +1439,10 @@ async def _nav_dialog_task(job: dict) -> None:
         _nav_run_go(job)
     else:
         try:
-            subprocess.run(["termux-notification-remove", nid],
-                           capture_output=True, timeout=6)
-        except Exception:  # noqa: BLE001
+            await asyncio.to_thread(
+                subprocess.run, ["termux-notification-remove", nid],
+                capture_output=True, timeout=6)
+        except Exception:
             pass
         # TG 摳制確認一開始就在度（keyboard）：彈窗過時/開唔到免再叫，log 已錄。
 
@@ -1468,7 +1469,7 @@ def _ai_mode_answer(question: str, timeout: int = 90) -> tuple:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8"))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, f"❌ 搜尋失敗：{e}"
     err = data.get("error")
     if isinstance(err, str) and err:
@@ -1518,20 +1519,20 @@ def _weather_report() -> tuple:
         with urllib.request.urlopen(_WEATHER_URL, timeout=30) as r:
             d = json.loads(r.read().decode("utf-8"))
         cur, daily, hourly = d["current"], d["daily"], d["hourly"]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, str(e)
     try:
         lines = [
-            f"而家：{_WMO.get(cur['weather_code'], '—')}，{cur['temperature_2m']}°C"
-            f"（體感 {cur['apparent_temperature']}°C），濕度 {cur['relative_humidity_2m']}%，"
-            f"風 {cur['wind_speed_10m']} km/h",
-            f"今日：{_WMO.get(daily['weather_code'][0], '—')}，"
-            f"{daily['temperature_2m_min'][0]}–{daily['temperature_2m_max'][0]}°C，"
-            f"最高落雨機率 {daily['precipitation_probability_max'][0]}%，"
-            f"UV {daily['uv_index_max'][0]}",
-            f"聽日：{_WMO.get(daily['weather_code'][1], '—')}，"
-            f"{daily['temperature_2m_min'][1]}–{daily['temperature_2m_max'][1]}°C，"
-            f"落雨機率 {daily['precipitation_probability_max'][1]}%",
+            (f"而家：{_WMO.get(cur['weather_code'], '—')}，{cur['temperature_2m']}°C"
+             f"（體感 {cur['apparent_temperature']}°C），濕度 {cur['relative_humidity_2m']}%，"
+             f"風 {cur['wind_speed_10m']} km/h"),
+            (f"今日：{_WMO.get(daily['weather_code'][0], '—')}，"
+             f"{daily['temperature_2m_min'][0]}–{daily['temperature_2m_max'][0]}°C，"
+             f"最高落雨機率 {daily['precipitation_probability_max'][0]}%，"
+             f"UV {daily['uv_index_max'][0]}"),
+            (f"聽日：{_WMO.get(daily['weather_code'][1], '—')}，"
+             f"{daily['temperature_2m_min'][1]}–{daily['temperature_2m_max'][1]}°C，"
+             f"落雨機率 {daily['precipitation_probability_max'][1]}%"),
         ]
         # 未來 6 小時落雨機率 → 帶遮建議
         t_now = cur.get("time", "")
@@ -1569,7 +1570,7 @@ def _payday_report() -> tuple:
         req = urllib.request.Request(url, headers={"User-Agent": "tgalarm/1.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return False, f"GAS 連唔到：{e}"
     disp = data.get("display") or {}
     if not disp or disp.get("mode") == "setup":
@@ -1591,7 +1592,7 @@ def _payday_report() -> tuple:
 # ---- 大話骰（liar.py 引擎：數學層+神經網絡，純本地 <1ms）----
 try:
     import liar as _liar
-except Exception:  # noqa: BLE001
+except Exception:
     _liar = None
 _LIAR_GAMES: dict = {}
 _LIAR_DICE_RE = re.compile(r"^\s*我?\s*((?:[1-6]\s+){4}[1-6])\s*$")
@@ -1696,7 +1697,7 @@ def _fx_reply(arg: str) -> str:
                 _FX_URL.format(base="USD"), timeout=20) as r:
             rates = json.loads(r.read().decode())["rates"]
         hkd = rates["HKD"]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return f"❌ 匯率攞唔到：{e}"
     if not arg.strip():
         rows = [f"1 {c} = {hkd / rates[c]:.4f} 港紙"
@@ -1722,7 +1723,7 @@ try:
     _zp = os.path.join(os.environ.get("PREFIX", "/usr"), "share", "zoneinfo")
     if os.path.isdir(_zp):
         _zi.reset_tzpath((_zp,))
-except Exception:  # noqa: BLE001
+except Exception:
     pass
 
 _TIME_ZONES = {"東京": "Asia/Tokyo", "首爾": "Asia/Seoul", "上海": "Asia/Shanghai",
@@ -1742,7 +1743,7 @@ def _time_reply(arg: str) -> str:
                 "曼谷／杜拜／溫哥華…")
     try:
         n = dt.datetime.now(ZoneInfo(z))
-    except Exception:  # noqa: BLE001 — 机內未裝時區資料
+    except Exception:
         return "⚠️ 呢部機未裝時區資料（tzdata）——叫 bot 幫手整"
     return f"🌍 {arg.strip()}而家 {n:%H:%M}（{n:%m月%d日 %a}）"
 
@@ -1982,7 +1983,7 @@ async def _refresh_todo(chat_id: int) -> None:
         try:
             await _APP.bot.edit_message_text(text, chat_id=cid, message_id=mid, reply_markup=kb)
             return
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if "not modified" in str(e).lower():
                 return
             log.warning("更新待辦訊息失敗（%s），重發", e)
@@ -1992,9 +1993,9 @@ async def _refresh_todo(chat_id: int) -> None:
         _save_json(TODO_PATH, st)
         try:
             await _APP.bot.pin_chat_message(chat_id, m.message_id, disable_notification=True)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("置頂失敗（可能權限問題）：%s", e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("待辦清單發送失敗：%s", e)
 
 
@@ -2014,7 +2015,7 @@ async def _on_todo_callback(update, context) -> None:
     _save_json(TODO_PATH, st)
     try:
         await q.edit_message_text(_fmt_todos(), reply_markup=_todo_keyboard())
-    except Exception:  # noqa: BLE001  # "Message is not modified"
+    except Exception:  # "Message is not modified"
         pass
     await q.answer("✅ 完成！" if item["done"] else "☐ 還原咗，加油")
 
@@ -2045,7 +2046,7 @@ def _playlist_videos_rss(list_id: str) -> list:
     try:
         xml = _fetch(f"https://www.youtube.com/feeds/videos.xml?playlist_id={list_id}")
         return _dedupe(re.findall(r"<yt:videoId>([\w-]{11})", xml))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("RSS 攞歌單失敗：%s", e)
         return []
 
@@ -2058,7 +2059,7 @@ def _playlist_videos_html(list_id: str) -> list:
         if not ids:
             ids = re.findall(r"watch\?v=([\w-]{11})", html)
         return _dedupe(ids)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("爬歌單頁失敗：%s", e)
         return []
 
@@ -2179,7 +2180,7 @@ async def _send_safe(chat_id: int, text: str, label: str = "訊息",
             if i:
                 log.info("%s重試後已送出", label)
             return True
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             last = e
             kind = _err_kind(e)
             if kind == "ratelimit":
@@ -3122,7 +3123,7 @@ async def _restore_jobs(app) -> None:
     if st.get("msg_id") and st.get("chat_id"):
         try:
             await _refresh_todo(st["chat_id"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("啟動時更新待辦訊息失敗：%s", e)
 
 
@@ -3243,7 +3244,7 @@ def _wa_move(now: dt.datetime, preview: bool = False,
         try:
             subprocess.Popen([ms, dest], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return "\n".join(lines)
 
@@ -3361,8 +3362,8 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         else:
             buf_label = f"留空 {cmd.buf}%"
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
-        lines = [f"🧩 時間分配（{kind} #{job['id']}）：{when}→{cmd.hour2:02d}:{cmd.minute2:02d}"
-                 f"（{fmt_duration(total)}・{buf_label}＝{fmt_duration(av)}隨你用）",
+        lines = [(f"🧩 時間分配（{kind} #{job['id']}）：{when}→{cmd.hour2:02d}:{cmd.minute2:02d}"
+                  f"（{fmt_duration(total)}・{buf_label}＝{fmt_duration(av)}隨你用）"),
                  _alloc_breakdown(job)]
         return "\n".join(lines) + _replaced_note(replaced)
     if a == "selfcheck":
@@ -3789,7 +3790,7 @@ async def _on_message(update, context):
     if m:
         await update.message.reply_text(_dice_reply(m.group(2) or ""))
         return
-    if t.startswith("揀 ") or t.startswith("揀"):
+    if t.startswith(("揀 ", "揀")):
         await update.message.reply_text(_pick_reply(t[1:].strip()))
         return
     if t.startswith("密碼"):
@@ -3888,7 +3889,7 @@ def _hold_wake_lock() -> bool:
         ok = r.returncode == 0
         log.info("wake lock %s", "攞到" if ok else f"攞唔到 rc={getattr(r, 'returncode', '?')}")
         return ok
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.info("wake lock 攞唔到：%s", e)
         return False
 
@@ -4009,9 +4010,7 @@ _PKG_ALIAS = {
 
 def _pkg_search(kw: str) -> list:
     """關鍵字搾第三方 package（pm list grep）＋別名表直達。"""
-    pkgs = []
-    for alias_pkg in _PKG_ALIAS.get(kw.lower(), []):
-        pkgs.append(alias_pkg)
+    pkgs = list(_PKG_ALIAS.get(kw.lower(), []))
     ok, out = _shell_priv_exec(
         f"pm list packages -3 | grep -i {shlex.quote(kw)}")
     if ok:
@@ -4069,7 +4068,13 @@ def main():
             "最簡單：行 bash setup.sh，佢會問你一次 token 然後全部自動搞掂；\n"
             "或者手動：export BOT_TOKEN=\"你嘅token\" 再 python bot.py"
         )
-    from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
+    from telegram.ext import (
+        Application,
+        CallbackQueryHandler,
+        CommandHandler,
+        MessageHandler,
+        filters,
+    )
 
     app = Application.builder().token(BOT_TOKEN).post_init(_restore_jobs).build()
     app.add_handler(CommandHandler("start", _on_start))
@@ -4084,7 +4089,7 @@ def main():
     app.run_polling(drop_pending_updates=True)
     try:
         subprocess.run(["termux-wake-unlock"], capture_output=True, timeout=10)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
