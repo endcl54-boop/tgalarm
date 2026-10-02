@@ -3954,21 +3954,57 @@ class TestDailyAlarm(unittest.TestCase):
 
 
 class TestTimerLabelCollision(unittest.TestCase):
-    """「計時 1530 1727」——4位數標籤撞「MMDD HHMM」語法：首 token 唔可能
-    係日期（月>12/日>31）就當 hhmm＋標籤；真日期照 mmdd；打錯日期照拒。"""
+    """「計時 1530 1727」——4位數撞「MMDD HHMM」語法（2026-10-02 用戶令改制）：
+    非外賣＝嚴謹 mmdd hhmm，日期唔存在明確拒絕（唔再靜靜當 hhmm＋標籤）；
+    外賣模式＝hhmm 後任何數字＝單號，蓋過 mmdd。真日期照 mmdd；打錯照拒。"""
 
-    def test_four_digit_label_fallback(self):
-        now = dt.datetime(2026, 9, 29, 13, 30)
-        p = bot.parse_command("計時 1530 1727", now)
-        self.assertIsNotNone(p)
-        self.assertEqual((p.fire_at.hour, p.fire_at.minute, p.fire_at.day),
-                         (15, 30, 29))
-        self.assertEqual(p.label, "1727")
-        p = bot.parse_command("計時 1530 單號1727", now)
-        self.assertEqual(p.label, "單號1727")
-        p = bot.parse_command("計時 0925 1830", now)
-        self.assertEqual(p.fire_at.date(), dt.date(2027, 9, 25))  # 真日期照舊
-        self.assertIsNone(bot.parse_command("計時 0931 1830", now))  # 打錯照拒
+    def test_strict_mmdd_without_takeaway(self):
+        old = dict(bot._TAKEAWAY)
+        bot._TAKEAWAY["on"] = False
+        try:
+            now = dt.datetime(2026, 9, 29, 13, 30)
+            self.assertIsNone(bot.parse_command("計時 1530 1727", now))  # 嚴謹：15月唔存在
+            self.assertIsNone(bot.parse_command("計時 0931 1830", now))  # 打錯照拒
+            p = bot.parse_command("計時 0925 1830", now)
+            self.assertEqual(p.fire_at.date(), dt.date(2027, 9, 25))  # 真日期照舊
+            p = bot.parse_command("計時 1230", now)                       # 淨 hhmm 照舊
+            self.assertEqual((p.fire_at.hour, p.fire_at.minute), (12, 30))
+            p = bot.parse_command("計時 1530 單號1727", now)              # 文字標籤照舊
+            self.assertEqual((p.fire_at.hour, p.fire_at.minute), (15, 30))
+            self.assertEqual(p.label, "單號1727")
+        finally:
+            bot._TAKEAWAY.clear()
+            bot._TAKEAWAY.update(old)
+
+    def test_takeaway_order_number_overrides(self):
+        old = dict(bot._TAKEAWAY)
+        bot._TAKEAWAY["on"] = True
+        try:
+            now = dt.datetime(2026, 9, 29, 13, 30)
+            p = bot.parse_command("計時 1530 1727", now)
+            self.assertEqual((p.fire_at.hour, p.fire_at.minute), (15, 30))
+            self.assertEqual(p.label, "單號1727")
+            # 蓋過 mmdd：1005 1830＝10:05＋單號1830（唔係日期）
+            p = bot.parse_command("計時 1005 1830", now)
+            self.assertEqual((p.fire_at.hour, p.fire_at.minute), (10, 5))
+            self.assertEqual(p.label, "單號1830")
+            # 任何位數都收
+            p = bot.parse_command("計時 1830 25", now)
+            self.assertEqual(p.label, "單號25")
+            p = bot.parse_command("計時到 1830 952786", now)
+            self.assertEqual(p.label, "單號952786")
+            # 相對日＋單號
+            p = bot.parse_command("計時 聽日 0900 777", now)
+            self.assertEqual((p.fire_at.hour, p.fire_at.minute, p.fire_at.day), (9, 0, 30))
+            self.assertEqual(p.label, "單號777")
+            # 非數字標籤照舊；淨 hhmm 冇標籤
+            p = bot.parse_command("計時 1830 開會", now)
+            self.assertEqual(p.label, "開會")
+            p = bot.parse_command("計時 1830", now)
+            self.assertEqual(p.label, "")
+        finally:
+            bot._TAKEAWAY.clear()
+            bot._TAKEAWAY.update(old)
 
 
 

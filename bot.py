@@ -128,7 +128,7 @@ HELP = (
     "・計時 25分鐘 攞集運（時鐘app響＋到點讀你聽；取消 N 淨刪語音）\n"
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
-    "・外賣模式：打「外賣」開——所有計時提早 5 分鐘響；「外賣結束」收工\n"
+    "・外賣模式：打「外賣」開——計時提早 5 分鐘響，hhmm 後面數字＝單號；「外賣結束」收工\n"
     "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
     "📅 倒數 考試 2027-05-04／倒數 聖誕 12-25（每年）／倒數（清單）　🎲 分組 3 阿明,阿強,阿寶\n"
@@ -277,7 +277,29 @@ def _read_datetime_target(rest: str, now: dt.datetime):
 
     日期（可省略）：明天/聽日/後天/大後天，或 mmdd（過咗計出年）。
     省略日期：沿用原有今日/聽日（過咗計聽日）邏輯。
+    外賣模式（2026-10-02 用戶令）：hhmm 後面任何數字＝單號（幾多位都收），
+    蓋過 mmdd 解析——「計時 1005 1830」＝今日 10:05 單號1830。
+    非外賣：mmdd hhmm 嚴謹制，日期唔存在（1530 1727／0931）明確拒絕。
     """
+    if _TAKEAWAY.get("on"):
+        day_off = None
+        for pat, days in _REL_DAYS:
+            m = re.match(r"(?:" + pat + r")\s*", rest, re.IGNORECASE)
+            if m:
+                rest = rest[m.end():]
+                day_off = days
+                break
+        r = _read_hhmm(rest)
+        if not r:
+            return None
+        hh, mm, label = r
+        ts = label.replace(" ", "")
+        if ts.isdigit():
+            label = f"單號{ts}"               # 任何數字都收，加「單號」兩字
+        if day_off is not None:
+            d = now.date() + dt.timedelta(days=day_off)
+            return dt.datetime(d.year, d.month, d.day, hh, mm), label
+        return _next_occurrence(now, hh, mm), label
     for pat, days in _REL_DAYS:
         m = re.match(r"(?:" + pat + r")\s*", rest, re.IGNORECASE)  # 要包 (?:) 先至頭尾夾得啱
         if m:
@@ -297,14 +319,10 @@ def _read_datetime_target(rest: str, now: dt.datetime):
             try:
                 target = dt.datetime(now.year, month, day, hh, mm)
             except ValueError:
-                # 4位數標籤/單號撞 mmdd 語法（例「計時 1530 1727」——15唔係月份，
-                # 2026-09-29 用戶實證）：首 token 根本唔可能係日期（月>12/日>31）
-                # 就當 hhmm＋後面全做標籤；似日期但打錯（如 0931）照拒絕
-                if ((month > 12 or day > 31)
-                        and int(tok[:2]) <= 23 and int(tok[2:]) <= 59):
-                    t2 = _next_occurrence(now, int(tok[:2]), int(tok[2:]))
-                    return t2, rest[m.end():].strip()
-                return None  # 日期唔存在（如 0931），明確拒絕，唔好亂估
+                # 嚴謹制（2026-10-02 用戶令恢復）：mmdd hhmm 兩 token 就係日期語法，
+                # 日期唔存在（1530 1727／0931 1830）明確拒絕——唔再靜靜當 hhmm＋標籤
+                #（要 hhmm＋數字，開外賣模式，數字會變單號）
+                return None
             while target <= now:
                 try:
                     target = target.replace(year=target.year + 1)
@@ -830,7 +848,8 @@ def _takeaway_handle(t: str):
             return "🛵 外賣模式開緊——計時照樣提早 5 分鐘響。「外賣結束」收工。"
         _takeaway_set(True)
         return ("🛵 外賣模式開！由而家起所有「計時／計時到」自動提早 5 分鐘響"
-                "（例：25分鐘→20分鐘）。攞完嘢打「外賣結束」還原。")
+                "（例：25分鐘→20分鐘）。hhmm 後面嘅數字會當單號"
+                "（例：計時 1830 25＝18:25 響＋單號25）。攞完嘢打「外賣結束」還原。")
     if t in ("外賣結束", "收外賣", "唔叫外賣"):
         if not _TAKEAWAY.get("on"):
             return "本來就冇開外賣模式。"
