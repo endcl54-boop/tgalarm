@@ -3463,7 +3463,7 @@ def _wa_move(now: dt.datetime, preview: bool = False,
     if len(hits) > 8:
         lines.append(f"  …（仲有 {len(hits) - 8} 張）")
     if not GEMINI_API_KEY:
-        lines.append("⚠️ 未設定 GEMINI_API_KEY——全部入未分類（config 加 key 開讀圖分類）")
+        lines.append("📁 全部入 未分類——你自己分崗位（電話檔案管理員或 PC 拖入 T74 等資料夾）")
     if preview:
         lines.append("（預覽：冇郁任何相；send「搬相」先真搬）")
         return "\n".join(lines)

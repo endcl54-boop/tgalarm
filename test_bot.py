@@ -1962,7 +1962,7 @@ class TestPatrol(unittest.TestCase):
         now = dt.datetime(2026, 9, 23, 14, 0)
         win = bot._wa_recent_window(now, 9, 0, 12, 0)
         r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
-        self.assertIn("未設定 GEMINI_API_KEY", r)
+        self.assertIn("你自己分崗位", r)
         self.assertIn("未分類:1", r)
         self.assertTrue(os.path.exists(os.path.join(
             self.dest, "2026 09月", "2026-09-23", "Shift_A", "未分類", "a.jpg")))
