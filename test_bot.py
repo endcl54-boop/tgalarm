@@ -1619,8 +1619,11 @@ class TestWaMove(unittest.TestCase):
         self.dest = tempfile.mkdtemp(prefix="wa_night_dest_")
         # 巡樓實景：凌晨 03:50 send「搬相」，睇返尋晚→而家啲相
         self.now = dt.datetime(2026, 9, 23, 3, 50)
+        self._key = bot.GEMINI_API_KEY
+        bot.GEMINI_API_KEY = ""                        # 預設封讀圖（個別測試自己開）
 
     def tearDown(self):
+        bot.GEMINI_API_KEY = self._key
         shutil.rmtree(self.tmp, ignore_errors=True)
         shutil.rmtree(self.dest, ignore_errors=True)
 
@@ -1705,8 +1708,9 @@ class TestWaMove(unittest.TestCase):
         r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
         self.assertIn("時段 09-23 09:00 → 09-23 12:00", r)
         self.assertIn("搬咗 1/1", r)
-        self.assertTrue(os.path.exists(os.path.join(self.dest, "b.jpg")))
-        self.assertFalse(os.path.exists(os.path.join(self.dest, "a.jpg")))  # 尋日唔搬
+        sub = os.path.join(self.dest, "2026 09月", "2026-09-23", "Shift_A", "未分類")
+        self.assertTrue(os.path.exists(os.path.join(sub, "b.jpg")))   # 09:00 屬 A更
+        self.assertFalse(os.path.exists(os.path.join(sub, "a.jpg")))  # 尋日唔搬
 
     def test_move_custom_cross_midnight(self):
         self._mk(self.sent, "n1.jpg", dt.datetime(2026, 9, 22, 23, 30))
@@ -1717,6 +1721,8 @@ class TestWaMove(unittest.TestCase):
         r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
         self.assertIn("09-22 23:00 → 09-23 07:00", r)
         self.assertIn("搬咗 2/2", r)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.dest, "2026 09月", "2026-09-22", "Shift_C", "未分類", "n1.jpg")))
 
     def test_execute_bad_range_hint(self):
         r = bot._execute_player(bot.PlayerCmd("wamove", ref="bad"), 12345, self.now)
@@ -1770,16 +1776,22 @@ class TestWaMove(unittest.TestCase):
         mid = dt.datetime(2026, 9, 23, 1, 30)
         p1 = self._mk(self.tmp, "IMG-a.jpg", mid)
         p2 = self._mk(self.sent, "IMG-b.jpg", dt.datetime(2026, 9, 23, 3, 46))
-        # 目的已有同名 → 防撞名
-        with open(os.path.join(self.dest, "IMG-a.jpg"), "wb") as f:
+        # 目的已有同名 → 防撞名（樹制：同名檔喺未分類資料夾入面）
+        sub_pre = os.path.join(self.dest, "2026 09月", "2026-09-22",
+                               "Shift_C", "未分類")
+        os.makedirs(sub_pre)
+        with open(os.path.join(sub_pre, "IMG-a.jpg"), "wb") as f:
             f.write(b"old")
         r = bot._wa_move(self.now, preview=False, src_root=self.tmp, dest=self.dest)
         self.assertIn("搬咗 2/2 張", r)
         self.assertIn("↗", r)                               # Sent 有箭嘴標記
+        self.assertIn("Shift_C", r)                         # 03:50 屬 C更（09-22 開始）
         self.assertFalse(os.path.exists(p1))
         self.assertFalse(os.path.exists(p2))
-        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-a-1.jpg")))
-        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-b.jpg")))
+        sub = os.path.join(self.dest, "2026 09月", "2026-09-22",
+                           "Shift_C", "未分類")
+        self.assertTrue(os.path.exists(os.path.join(sub, "IMG-a-1.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(sub, "IMG-b.jpg")))
 
     def test_move_nothing_to_do(self):
         r = bot._wa_move(self.now, src_root=self.tmp, dest=self.dest)
@@ -1801,16 +1813,17 @@ class TestWaMove(unittest.TestCase):
         mid = dt.datetime(2026, 9, 23, 1, 30)
         self._mk(self.tmp, "IMG-x.jpg", mid)
         cmd = bot.parse_player("搬相")
-        # 注入 src_root／dest 做沙盒模擬
-        old_dirs, old_dest = bot._WA_MEDIA_CANDIDATES, bot._WA_DEST
+        # 注入 src_root／PATROL_ROOT 做沙盒模擬
+        old_dirs, old_root = bot._WA_MEDIA_CANDIDATES, bot.PATROL_ROOT
         bot._WA_MEDIA_CANDIDATES = (self.tmp,)
-        bot._WA_DEST = self.dest
+        bot.PATROL_ROOT = self.dest
         try:
             r = bot._execute_player(cmd, 12345, self.now)
         finally:
-            bot._WA_MEDIA_CANDIDATES, bot._WA_DEST = old_dirs, old_dest
+            bot._WA_MEDIA_CANDIDATES, bot.PATROL_ROOT = old_dirs, old_root
         self.assertIn("搬咗 1/1 張", r)
-        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-x.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(
+            self.dest, "2026 09月", "2026-09-22", "Shift_C", "未分類", "IMG-x.jpg")))
 
 
 class TestWaReturn(unittest.TestCase):
@@ -1871,7 +1884,155 @@ class TestWaReturn(unittest.TestCase):
         r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)
         self.assertIn("冇相", r)
         r = bot._wa_return(self.now, src="/no/such/dir_xyz", dest_root=self.dest)
-        self.assertIn("搵唔到 WA_Night", r)
+        self.assertIn("搵唔到 BG巡邏相片記錄／WA_Night", r)
+
+
+class TestPatrol(unittest.TestCase):
+    """巡邏相片分類機制（2026-10-04 用戶令）：讀圖判崗位→歸檔 PC 同款樹。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wa_media_")
+        os.makedirs(os.path.join(self.tmp, "Sent"))
+        self.dest = tempfile.mkdtemp(prefix="patrol_root_")
+        self.now = dt.datetime(2026, 9, 23, 14, 0)
+        self._key, self._cls = bot.GEMINI_API_KEY, bot._gemini_classify
+        self._root, self._posts = bot.PATROL_ROOT, bot.PATROL_POSTS
+
+    def tearDown(self):
+        bot.GEMINI_API_KEY, bot._gemini_classify = self._key, self._cls
+        bot.PATROL_ROOT, bot.PATROL_POSTS = self._root, self._posts
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.dest, ignore_errors=True)
+
+    def _mk(self, dirpath, name, when):
+        p = os.path.join(dirpath, name)
+        with open(p, "wb") as f:
+            f.write(b"jpg")
+        ts = when.timestamp()
+        os.utime(p, (ts, ts))
+        return p
+
+    def test_shift_mapping(self):
+        S = bot._patrol_shift
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 7, 0)), ("A", dt.date(2026, 10, 4)))
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 14, 59)), ("A", dt.date(2026, 10, 4)))
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 15, 0)), ("B", dt.date(2026, 10, 4)))
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 23, 5)), ("C", dt.date(2026, 10, 4)))
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 0, 30)), ("C", dt.date(2026, 10, 3)))
+        self.assertEqual(S(dt.datetime(2026, 10, 4, 6, 59)), ("C", dt.date(2026, 10, 3)))
+
+    def test_move_classified_into_tree(self):
+        self._mk(self.tmp, "a.jpg", dt.datetime(2026, 9, 23, 9, 5))
+        self._mk(self.tmp, "b.jpg", dt.datetime(2026, 9, 23, 10, 0))
+        self._mk(self.tmp, "c.jpg", dt.datetime(2026, 9, 23, 11, 0))
+
+        def fake(path, posts=None):
+            n = os.path.basename(path)
+            return {"a.jpg": ("T74", "T74"), "b.jpg": ("CP1", "CP1")}.get(n, (None, "未知"))
+        bot.GEMINI_API_KEY = "X"
+        bot._gemini_classify = fake
+        now = dt.datetime(2026, 9, 23, 14, 0)
+        win = bot._wa_recent_window(now, 9, 0, 12, 0)
+        r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
+        self.assertIn("T74:1", r)
+        self.assertIn("CP1:1", r)
+        self.assertIn("未分類:1", r)
+        self.assertIn("Shift_A", r)
+        base = os.path.join(self.dest, "2026 09月", "2026-09-23", "Shift_A")
+        self.assertTrue(os.path.exists(os.path.join(base, "T74", "a.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(base, "CP1", "b.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(base, "未分類", "c.jpg")))
+
+    def test_preview_shows_targets_without_moving(self):
+        self._mk(self.tmp, "a.jpg", dt.datetime(2026, 9, 23, 9, 5))
+        bot.GEMINI_API_KEY = "X"
+        bot._gemini_classify = lambda path, posts=None: ("T74", "T74")
+        now = dt.datetime(2026, 9, 23, 14, 0)
+        win = bot._wa_recent_window(now, 9, 0, 12, 0)
+        r = bot._wa_move(now, preview=True, src_root=self.tmp,
+                         dest=self.dest, window=win)
+        self.assertIn("→ T74", r)
+        self.assertIn("冇郁任何相", r)
+        self.assertEqual(os.listdir(self.dest), [])
+
+    def test_no_key_all_unclassified(self):
+        self._mk(self.tmp, "a.jpg", dt.datetime(2026, 9, 23, 9, 5))
+        now = dt.datetime(2026, 9, 23, 14, 0)
+        win = bot._wa_recent_window(now, 9, 0, 12, 0)
+        r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
+        self.assertIn("未設定 GEMINI_API_KEY", r)
+        self.assertIn("未分類:1", r)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.dest, "2026 09月", "2026-09-23", "Shift_A", "未分類", "a.jpg")))
+
+    def test_gemini_classify_parse(self):
+        import urllib.request
+
+        class R:
+            def __init__(self_, text):
+                self_.payload = json.dumps(
+                    {"candidates": [{"content": {"parts": [{"text": text}]}}]}).encode()
+
+            def read(self_):
+                return self_.payload
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+        bot.GEMINI_API_KEY = "X"
+        holder = []
+
+        def fake_urlopen(req, timeout=25):
+            holder.append(req)
+            return R("T74。\n")
+        old = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            p = self._mk(self.tmp, "x.jpg", dt.datetime(2026, 9, 23, 9, 5))
+            post, _raw = bot._gemini_classify(p, posts=["T74", "CP1"])
+            self.assertEqual(post, "T74")
+            body = json.loads(holder[0].data.decode())
+            self.assertIn("inline_data", json.dumps(body["contents"][0]["parts"][0]))
+            urllib.request.urlopen = lambda req, timeout=25: R("未知")
+            post, _ = bot._gemini_classify(p, posts=["T74", "CP1"])
+            self.assertIsNone(post)
+        finally:
+            urllib.request.urlopen = old
+
+    def test_gemini_classify_no_key_and_error(self):
+        bot.GEMINI_API_KEY = ""
+        p = self._mk(self.tmp, "x.jpg", dt.datetime(2026, 9, 23, 9, 5))
+        post, msg = bot._gemini_classify(p)
+        self.assertIsNone(post)
+        self.assertIn("GEMINI_API_KEY", msg)
+        bot.GEMINI_API_KEY = "X"
+        import urllib.request
+        old = urllib.request.urlopen
+
+        def boom(req, timeout=25):
+            raise OSError("no net")
+        urllib.request.urlopen = boom
+        try:
+            post, msg = bot._gemini_classify(p)
+        finally:
+            urllib.request.urlopen = old
+        self.assertIsNone(post)
+        self.assertIn("no net", msg)
+
+    def test_return_recursive_tree(self):
+        t74 = os.path.join(self.tmp, "2026 09月", "2026-09-23", "Shift_A", "T74")
+        os.makedirs(t74)
+        self._mk(t74, "a.jpg", dt.datetime(2026, 9, 23, 9, 5))
+        un = os.path.join(self.tmp, "2026 09月", "2026-09-22", "Shift_C", "未分類")
+        os.makedirs(un)
+        self._mk(un, "b.jpg", dt.datetime(2026, 9, 23, 3, 0))
+        r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)
+        self.assertIn("搬咗 2/2", r)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "a.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "b.jpg")))
+        self.assertEqual(os.listdir(t74), [])
 
 
 class TestPlaylistCache(unittest.TestCase):

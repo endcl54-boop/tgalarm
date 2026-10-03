@@ -29,7 +29,9 @@ WhatsApp 相搬移（純 Python，毫秒内動作）：
     搬相預覽              齋列出符合嘅相，唔郁真身
     搬相 HHMM HHMM        自訂任何時段（當日 0900 1200／跨夜 2300 0700），
                           之後加「預覽」都食——搬最近一次出現嘅嗰個窗
-    搬回／搬返            將 WA_Night 相簿全數搬返 WhatsApp Images（搬回預覽＝齋睇）
+    搬相（分類制）        讀圖自動判崗位，歸檔 BG巡邏相片記錄／
+                          YYYY M月／YYYY-MM-DD／Shift_A(07-15)B(15-23)C(23-07)／崗位
+    搬回／搬返            將分類樹（＋舊 WA_Night）全數遞歸搬返 WhatsApp Images
 
 設定來源（優先次序：環境變數 > ~/.tgalarm/config）：
     BOT_TOKEN          必填，向 @BotFather 申請（setup.sh 會問你一次）
@@ -91,6 +93,15 @@ def _read_config_file() -> dict:
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or _read_config_file().get("BOT_TOKEN", "").strip()
 GAS_URL = os.environ.get("GAS_URL", "").strip() or _read_config_file().get("GAS_URL", "").strip()
+GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY", "").strip()
+                  or _read_config_file().get("GEMINI_API_KEY", "").strip())
+PATROL_ROOT = (os.environ.get("PATROL_ROOT", "").strip()
+               or _read_config_file().get("PATROL_ROOT", "").strip()
+               or "/storage/emulated/0/Pictures/BG巡邏相片記錄")
+PATROL_POSTS = [p.strip() for p in (
+    os.environ.get("PATROL_POSTS", "").strip()
+    or _read_config_file().get("PATROL_POSTS", "").strip()
+    or "Ch,CP1,Platform,T74,T76,T78,T80,T82,T84").split(",") if p.strip()]
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1" or "--dry-run" in sys.argv
 SKIP_UI = (os.environ.get("SKIP_UI") or _read_config_file().get("SKIP_UI", "1")) != "0"
 
@@ -157,7 +168,7 @@ HELP = (
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
     "🔊 語音：全線任務到點廣東話旁白・下一個（隨問隨讀）・講 [文字]\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
-    "🌙 搬相：「搬相」搬最近夜更時段（23:00–07:00，包自己傳出嘅）去 WA_Night 相簿；「搬相 HHMM HHMM」自訂任何時段（當日 0900 1200／跨夜 2300 0700）；「搬相預覽」齋睇唔搬；「搬回」全數搬返 WhatsApp Images\n"
+    "🌙 搬相：「搬相」搬最近夜更時段（23:00–07:00）；「搬相 HHMM HHMM」自訂時段——讀圖自動分崗位，歸檔 BG巡邏相片記錄／月份／日期／Shift_A/B/C／崗位；「搬相預覽」齋睇；「搬回」全數搬返 WhatsApp Images\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
@@ -3329,18 +3340,75 @@ def _wa_scan(dirs: list, start: dt.datetime, end: dt.datetime) -> list:
     return hits
 
 
+def _patrol_shift(ts: dt.datetime) -> tuple:
+    """巡更更次（2026-10-04 用戶制，照 PC 樹 Shift_A/B/C）：
+    07:00–15:00=A・15:00–23:00=B・23:00–07:00=C（跨夜）。
+    回傳 (字母, 更次開始日 date)——C更 過午夜，開始日算前一晚。"""
+    if 7 <= ts.hour < 15:
+        return "A", ts.date()
+    if 15 <= ts.hour < 23:
+        return "B", ts.date()
+    if ts.hour >= 23:
+        return "C", ts.date()
+    return "C", (ts - dt.timedelta(days=1)).date()
+
+
+def _gemini_classify(img_path: str, posts: list | None = None) -> tuple:
+    """Gemini 讀圖判崗位（2026-10-04 用戶令：bot 讀圖分類）。
+    回傳 (代號 或 None, 原始回覆或錯誤)。判唔出／出錯→None。"""
+    import base64
+    import urllib.parse
+    import urllib.request
+    if not GEMINI_API_KEY:
+        return None, "未設定 GEMINI_API_KEY"
+    posts = posts or PATROL_POSTS
+    try:
+        with open(img_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+    except OSError as e:
+        return None, f"讀唔到檔：{e}"
+    prompt = ("香港屋苑保安巡邏相，判斷屬於邊個崗位。只可以回覆以下其中一個代號："
+              + "、".join(posts)
+              + "。根據相中大廈座數牌／樓層牌／位置特徵判斷；判斷唔到就只回覆：未知。")
+    body = json.dumps({"contents": [{"parts": [
+        {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
+        {"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 16}}).encode()
+    url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+           "gemini-2.0-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY))
+    err = ""
+    for _ in range(2):                                  # 出錯重試一次
+        try:
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            parts = ((data.get("candidates") or [{}])[0].get("content")
+                     or {}).get("parts") or [{}]
+            txt = (parts[0].get("text") or "").strip()
+            tok = re.sub(r"[^A-Za-z0-9]", "", txt.splitlines()[0] if txt else "")
+            for p in posts:
+                if tok and tok.lower() == re.sub(r"[^A-Za-z0-9]", "", p).lower():
+                    return p, txt
+            return None, txt or "空回覆"
+        except Exception as e:
+            err = str(e)
+    return None, err
+
+
 def _wa_move(now: dt.datetime, preview: bool = False,
              src_root: str | None = None, dest: str | None = None,
              window: tuple | None = None) -> str:
-    """搬相主體：掃 →（預覽）列／真搬，兼防撞名。回傳畀用戶嘅訊息。
+    """搬相主體：掃 → 讀圖分類 → 歸檔入巡邏相片記錄樹（2026-10-04 用戶令）。
 
-    window=None＝最近夜更時段（23:00–07:00）；否則 (start, end) 自訂時段
-    （2026-10-02 用戶令：當日或跨夜任何時段）。"""
+    樹：root/YYYY M月/YYYY-MM-DD/Shift_X/崗位｜未分類；
+    更次照 PC 樹：A 07–15・B 15–23・C 23–07（跟更次開始日）。
+    window=None＝最近夜更時段；dest＝測試用 root 覆寫。"""
     dirs = _wa_dirs(src_root)
     if not dirs:
         return ("❌ 搵唔到 WhatsApp Images 資料夾。\n"
                 "先喺 Termux 行：termux-setup-storage（撳「允許」儲存權限），再 send「搬相」")
-    dest = dest or _WA_DEST
+    root = dest or PATROL_ROOT
     custom = window is not None
     head = "時段" if custom else "夜更時段"
     icon = "📁" if custom else "🌙"
@@ -3349,41 +3417,63 @@ def _wa_move(now: dt.datetime, preview: bool = False,
     span = f"{start:%m-%d %H:%M} → {end:%m-%d %H:%M}"
     if not hits:
         return f"✅ {head}（{span}）冇相，唔使搬。"
+    if GEMINI_API_KEY:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            labels = list(ex.map(lambda h: _gemini_classify(h[1])[0], hits))
+    else:
+        labels = [None] * len(hits)
+    letter, sdate = _patrol_shift(start)
+    base = os.path.join(root, f"{sdate:%Y} {sdate:%m}月",
+                        f"{sdate:%Y-%m-%d}", f"Shift_{letter}")
     sent_n = sum(1 for _, p in hits if "/Sent/" in p or "/Outgoing/" in p)
-    lines = [f"{icon} {head} {span}，共 {len(hits)} 張（其中自己傳出 {sent_n} 張）："]
-    for ts, path in hits[:8]:
+    tally = {}
+    for lab in labels:
+        k = lab or "未分類"
+        tally[k] = tally.get(k, 0) + 1
+    lines = [f"{icon} {head} {span}，共 {len(hits)} 張"
+             f"（其中自己傳出 {sent_n} 張）——讀圖分類："
+             + "　".join(f"{k}:{v}" for k, v in tally.items())]
+    for (ts, path), lab in list(zip(hits, labels))[:8]:
         tag = "↗" if "/Sent/" in path or "/Outgoing/" in path else "↘"
-        lines.append(f"  {tag}[{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] {os.path.basename(path)}")
+        lines.append(f"  {tag}[{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] "
+                     f"{os.path.basename(path)} → {lab or '未分類'}")
     if len(hits) > 8:
         lines.append(f"  …（仲有 {len(hits) - 8} 張）")
+    if not GEMINI_API_KEY:
+        lines.append("⚠️ 未設定 GEMINI_API_KEY——全部入未分類（config 加 key 開讀圖分類）")
     if preview:
         lines.append("（預覽：冇郁任何相；send「搬相」先真搬）")
         return "\n".join(lines)
-    os.makedirs(dest, exist_ok=True)
     moved = 0
-    for ts, path in hits:
-        base = os.path.basename(path)
-        target = os.path.join(dest, base)
-        if os.path.exists(target):                      # 防撞名 → -1 -2…
-            stem, ext = os.path.splitext(base)
-            i = 1
-            while os.path.exists(os.path.join(dest, f"{stem}-{i}{ext}")):
-                i += 1
-            target = os.path.join(dest, f"{stem}-{i}{ext}")
+    touched = set()
+    for (ts, path), lab in zip(hits, labels):
+        d = os.path.join(base, lab or "未分類")
         try:
+            os.makedirs(d, exist_ok=True)
+            base_fn = os.path.basename(path)
+            target = os.path.join(d, base_fn)
+            if os.path.exists(target):                  # 防撞名 → -1 -2…
+                stem, ext = os.path.splitext(base_fn)
+                i = 1
+                while os.path.exists(os.path.join(d, f"{stem}-{i}{ext}")):
+                    i += 1
+                target = os.path.join(d, f"{stem}-{i}{ext}")
             os.replace(path, target)
             moved += 1
+            touched.add(d)
         except OSError as e:
             log.warning("搬相失敗 %s：%s", path, e)
-    lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {dest}")
-    lines.append("（WhatsApp 對話內嗰啲縮圖會變灰；去返相簿 WA_Night 睇原圖）")
-    ms = shutil.which("termux-media-scan")              # 通知相簿掃描，開槍就走唔等佢
-    if ms:
-        try:
-            subprocess.Popen([ms, dest], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+    lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {base}")
+    lines.append("（USB 過電腦：成個 BG巡邏相片記錄 資料夾抄過去直接合併同名樹）")
+    ms = shutil.which("termux-media-scan")
+    for d in touched:
+        if ms:
+            try:
+                subprocess.Popen([ms, d], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
     return "\n".join(lines)
 
 
@@ -3392,9 +3482,12 @@ def _wa_return(now: dt.datetime, preview: bool = False,
     """搬回：WA_Night 相簿 → WhatsApp Images 主目錄（2026-10-03 用戶令）。
 
     全數搬回（唔分時段——搬出去嘅嘢要就得全部）；防撞名 -1 -2；預覽唔郁。"""
-    src = src or _WA_DEST
-    if not os.path.isdir(src):
-        return "❌ 搵唔到 WA_Night 相簿（未搬過相？）。"
+    roots = []
+    for r in ((src,) if src else (PATROL_ROOT, _WA_DEST)):
+        if r and os.path.isdir(r) and r not in roots:
+            roots.append(r)
+    if not roots:
+        return "❌ 搵唔到 BG巡邏相片記錄／WA_Night 相簿（未搬過相？）。"
     root = dest_root
     if not root:
         for c in _WA_MEDIA_CANDIDATES:
@@ -3404,11 +3497,25 @@ def _wa_return(now: dt.datetime, preview: bool = False,
     if not root:
         return ("❌ 搵唔到 WhatsApp Images 資料夾。\n"
                 "先喺 Termux 行：termux-setup-storage（撳「允許」儲存權限），再 send「搬回」")
-    hits = _wa_scan([src], dt.datetime(1970, 1, 1),
-                    now + dt.timedelta(days=3650))     # 大窗＝全數
+    hits, seen = [], set()
+    for r in roots:                                     # 遞歸行勻分類樹（2026-10-04）
+        for dirpath, _dn, fns in os.walk(r):
+            for fn in fns:
+                if not fn.lower().endswith(_WA_EXTS):
+                    continue
+                p = os.path.join(dirpath, fn)
+                if p in seen:
+                    continue
+                try:
+                    ts = os.stat(p).st_mtime
+                except OSError:
+                    continue
+                seen.add(p)
+                hits.append((ts, p))
+    hits.sort()
     if not hits:
-        return "✅ WA_Night 冇相，唔使搬。"
-    lines = [f"↩️ WA_Night 共 {len(hits)} 張，搬返 {os.path.basename(root.rstrip('/')) or root}："]
+        return "✅ 冇相，唔使搬。"
+    lines = [f"↩️ 共 {len(hits)} 張，搬返 {os.path.basename(root.rstrip('/')) or root}："]
     for ts, path in hits[:8]:
         lines.append(f"  [{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] {os.path.basename(path)}")
     if len(hits) > 8:
@@ -3434,7 +3541,7 @@ def _wa_return(now: dt.datetime, preview: bool = False,
     lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {root}")
     ms = shutil.which("termux-media-scan")
     if ms:
-        for d in (root, src):
+        for d in [root] + roots:
             try:
                 subprocess.Popen([ms, d], stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -4084,7 +4191,11 @@ async def _on_message(update, context):
     results = []
     for ln, p in items:
         if isinstance(p, PlayerCmd):
-            results.append(_execute_player(p, update.effective_chat.id, now))
+            if p.action in ("wamove", "wareturn"):      # 讀圖分類需時，唔好閉塞 loop
+                results.append(await asyncio.to_thread(
+                    _execute_player, p, update.effective_chat.id, now))
+            else:
+                results.append(_execute_player(p, update.effective_chat.id, now))
             if p.action == "todo":
                 asyncio.create_task(_say(_todo_speech()))
         elif p:
