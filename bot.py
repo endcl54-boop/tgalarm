@@ -29,6 +29,7 @@ WhatsApp 相搬移（純 Python，毫秒内動作）：
     搬相預覽              齋列出符合嘅相，唔郁真身
     搬相 HHMM HHMM        自訂任何時段（當日 0900 1200／跨夜 2300 0700），
                           之後加「預覽」都食——搬最近一次出現嘅嗰個窗
+    搬回／搬返            將 WA_Night 相簿全數搬返 WhatsApp Images（搬回預覽＝齋睇）
 
 設定來源（優先次序：環境變數 > ~/.tgalarm/config）：
     BOT_TOKEN          必填，向 @BotFather 申請（setup.sh 會問你一次）
@@ -156,7 +157,7 @@ HELP = (
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
     "🔊 語音：全線任務到點廣東話旁白・下一個（隨問隨讀）・講 [文字]\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
-    "🌙 搬相：「搬相」搬最近夜更時段（23:00–07:00，包自己傳出嘅）去 WA_Night 相簿；「搬相 HHMM HHMM」自訂任何時段（當日 0900 1200／跨夜 2300 0700）；「搬相預覽」齋睇唔搬\n"
+    "🌙 搬相：「搬相」搬最近夜更時段（23:00–07:00，包自己傳出嘅）去 WA_Night 相簿；「搬相 HHMM HHMM」自訂任何時段（當日 0900 1200／跨夜 2300 0700）；「搬相預覽」齋睇唔搬；「搬回」全數搬返 WhatsApp Images\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
@@ -557,6 +558,11 @@ def parse_player(text: str) -> PlayerCmd | None:
                 return PlayerCmd("wamove", ref="preview" if preview else "",
                                  extra=f"{t0[0]} {t0[1]} {t1[0]} {t1[1]}")
         return PlayerCmd("wamove", ref="bad")
+    if re.fullmatch(r"/?(?:搬回|搬返)(?:wa|whatsapp)?相?(?:\s*(?:預覽|preview|list))?",
+                    s, re.IGNORECASE):
+        return PlayerCmd("wareturn",
+                         ref="preview" if re.search(r"(?:預覽|preview|list)\s*$",
+                                                    s, re.IGNORECASE) else "")
     if re.fullmatch(r"/?(?:停|停止|停播|stop)", s, re.IGNORECASE):
         return PlayerCmd("stop")
     if re.fullmatch(r"/?(?:播程|排程|播放日程|日程|jobs)", s, re.IGNORECASE):
@@ -3381,8 +3387,66 @@ def _wa_move(now: dt.datetime, preview: bool = False,
     return "\n".join(lines)
 
 
+def _wa_return(now: dt.datetime, preview: bool = False,
+               src: str | None = None, dest_root: str | None = None) -> str:
+    """搬回：WA_Night 相簿 → WhatsApp Images 主目錄（2026-10-03 用戶令）。
+
+    全數搬回（唔分時段——搬出去嘅嘢要就得全部）；防撞名 -1 -2；預覽唔郁。"""
+    src = src or _WA_DEST
+    if not os.path.isdir(src):
+        return "❌ 搵唔到 WA_Night 相簿（未搬過相？）。"
+    root = dest_root
+    if not root:
+        for c in _WA_MEDIA_CANDIDATES:
+            if os.path.isdir(c):
+                root = c
+                break
+    if not root:
+        return ("❌ 搵唔到 WhatsApp Images 資料夾。\n"
+                "先喺 Termux 行：termux-setup-storage（撳「允許」儲存權限），再 send「搬回」")
+    hits = _wa_scan([src], dt.datetime(1970, 1, 1),
+                    now + dt.timedelta(days=3650))     # 大窗＝全數
+    if not hits:
+        return "✅ WA_Night 冇相，唔使搬。"
+    lines = [f"↩️ WA_Night 共 {len(hits)} 張，搬返 {os.path.basename(root.rstrip('/')) or root}："]
+    for ts, path in hits[:8]:
+        lines.append(f"  [{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] {os.path.basename(path)}")
+    if len(hits) > 8:
+        lines.append(f"  …（仲有 {len(hits) - 8} 張）")
+    if preview:
+        lines.append("（預覽：冇郁任何相；send「搬回」先真搬）")
+        return "\n".join(lines)
+    moved = 0
+    for ts, path in hits:
+        base = os.path.basename(path)
+        target = os.path.join(root, base)
+        if os.path.exists(target):                      # 防撞名 → -1 -2…
+            stem, ext = os.path.splitext(base)
+            i = 1
+            while os.path.exists(os.path.join(root, f"{stem}-{i}{ext}")):
+                i += 1
+            target = os.path.join(root, f"{stem}-{i}{ext}")
+        try:
+            os.replace(path, target)
+            moved += 1
+        except OSError as e:
+            log.warning("搬回失敗 %s：%s", path, e)
+    lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {root}")
+    ms = shutil.which("termux-media-scan")
+    if ms:
+        for d in (root, src):
+            try:
+                subprocess.Popen([ms, d], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+    return "\n".join(lines)
+
+
 def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     a = cmd.action
+    if a == "wareturn":
+        return _wa_return(now, preview=(cmd.ref == "preview"))
     if a == "wamove":
         if cmd.ref == "bad":
             return ("❓ 用法：「搬相 HHMM HHMM」自訂任何時段——當日"

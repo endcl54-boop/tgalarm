@@ -1729,7 +1729,7 @@ class TestWaMove(unittest.TestCase):
         r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
         self.assertIn("冇相，唔使搬", r)
 
-    # ── 目錄偵測 ──
+
     def test_dirs_include_sent(self):
         ds = bot._wa_dirs(self.tmp)
         self.assertIn(self.tmp, ds)
@@ -1810,6 +1810,149 @@ class TestWaMove(unittest.TestCase):
             bot._WA_MEDIA_CANDIDATES, bot._WA_DEST = old_dirs, old_dest
         self.assertIn("搬咗 1/1 張", r)
         self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-x.jpg")))
+
+
+    def test_dirs_include_sent(self):
+        ds = bot._wa_dirs(self.tmp)
+        self.assertIn(self.tmp, ds)
+        self.assertIn(self.sent, ds)
+
+    def test_dirs_missing_root(self):
+        self.assertEqual(bot._wa_dirs("/no/such/path_xyz"), [])
+
+    # ── 掃描 ──
+    def test_scan_filters_time_ext_depth(self):
+        s, e = bot._wa_night_window(self.now)
+        mid = dt.datetime(2026, 9, 23, 1, 30)         # 時段內
+        out_hi = dt.datetime(2026, 9, 23, 22, 30)     # 時段外（夜晚後嘅日更）
+        p_in = self._mk(self.tmp, "IMG-in.jpg", mid)
+        p_sent = self._mk(self.sent, "IMG-sent.jpg", dt.datetime(2026, 9, 23, 3, 46))
+        self._mk(self.tmp, "IMG-late.jpg", out_hi)                    # 時段外唔中
+        self._mk(self.tmp, "IMG-eqend.jpg", e)                        # [start,end) 開端唔中
+        self._mk(self.tmp, "note.txt", mid)                           # 非圖唔中
+        sub = os.path.join(self.tmp, "Private"); os.makedirs(sub)
+        self._mk(sub, "IMG-deep.jpg", mid)                            # 深一層唔掃
+        hits = bot._wa_scan([self.tmp, self.sent], s, e)
+        self.assertEqual([p for _, p in hits], sorted([p_in, p_sent],
+                        key=lambda p: os.stat(p).st_mtime))
+
+    # ── 預覽 ──
+    def test_preview_lists_without_moving(self):
+        mid = dt.datetime(2026, 9, 23, 1, 30)
+        p1 = self._mk(self.tmp, "IMG-a.jpg", mid)
+        r = bot._wa_move(self.now, preview=True, src_root=self.tmp, dest=self.dest)
+        self.assertIn("預覽", r)
+        self.assertIn("1 張", r)
+        self.assertTrue(os.path.exists(p1))                 # 冇郁
+        self.assertEqual(os.listdir(self.dest), [])         # 目的空置
+
+    # ── 真搬 ──
+    def test_move_underground(self):
+        mid = dt.datetime(2026, 9, 23, 1, 30)
+        p1 = self._mk(self.tmp, "IMG-a.jpg", mid)
+        p2 = self._mk(self.sent, "IMG-b.jpg", dt.datetime(2026, 9, 23, 3, 46))
+        # 目的已有同名 → 防撞名
+        with open(os.path.join(self.dest, "IMG-a.jpg"), "wb") as f:
+            f.write(b"old")
+        r = bot._wa_move(self.now, preview=False, src_root=self.tmp, dest=self.dest)
+        self.assertIn("搬咗 2/2 張", r)
+        self.assertIn("↗", r)                               # Sent 有箭嘴標記
+        self.assertFalse(os.path.exists(p1))
+        self.assertFalse(os.path.exists(p2))
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-a-1.jpg")))
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-b.jpg")))
+
+    def test_move_nothing_to_do(self):
+        r = bot._wa_move(self.now, src_root=self.tmp, dest=self.dest)
+        self.assertIn("冇相", r)
+
+    def test_move_missing_folder_guidance(self):
+        r = bot._wa_move(self.now, src_root="/no/such/path_xyz")
+        self.assertIn("termux-setup-storage", r)
+
+    # ── 指令文法 ──
+    def test_grammar(self):
+        self.assertEqual(bot.parse_player("搬相").action, "wamove")
+        self.assertEqual(bot.parse_player("搬whatsapp相").action, "wamove")
+        p = bot.parse_player("搬WA相 預覽")
+        self.assertEqual((p.action, p.ref), ("wamove", "preview"))
+
+    # ── 端到端（指令 → _execute_player） ──
+    def test_execute_end_to_end(self):
+        mid = dt.datetime(2026, 9, 23, 1, 30)
+        self._mk(self.tmp, "IMG-x.jpg", mid)
+        cmd = bot.parse_player("搬相")
+        # 注入 src_root／dest 做沙盒模擬
+        old_dirs, old_dest = bot._WA_MEDIA_CANDIDATES, bot._WA_DEST
+        bot._WA_MEDIA_CANDIDATES = (self.tmp,)
+        bot._WA_DEST = self.dest
+        try:
+            r = bot._execute_player(cmd, 12345, self.now)
+        finally:
+            bot._WA_MEDIA_CANDIDATES, bot._WA_DEST = old_dirs, old_dest
+        self.assertIn("搬咗 1/1 張", r)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-x.jpg")))
+
+
+class TestWaReturn(unittest.TestCase):
+    """搬回：WA_Night → WhatsApp Images（2026-10-03 用戶令）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wa_night_src_")      # 當 WA_Night
+        self.dest = tempfile.mkdtemp(prefix="wa_images_dest_")   # 當 WhatsApp Images
+        self.now = dt.datetime(2026, 9, 23, 12, 0)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.dest, ignore_errors=True)
+
+    def _mk(self, name, when=dt.datetime(2026, 9, 23, 1, 0)):
+        p = os.path.join(self.tmp, name)
+        with open(p, "wb") as f:
+            f.write(b"jpg")
+        ts = when.timestamp()
+        os.utime(p, (ts, ts))
+        return p
+
+    def test_parse(self):
+        self.assertEqual(bot.parse_player("搬回").action, "wareturn")
+        self.assertEqual(bot.parse_player("搬返").action, "wareturn")
+        p = bot.parse_player("搬回預覽")
+        self.assertEqual((p.action, p.ref), ("wareturn", "preview"))
+        p = bot.parse_player("搬返預覽")
+        self.assertEqual((p.action, p.ref), ("wareturn", "preview"))
+        self.assertIsNone(bot.parse_player("搬回 ABC"))
+        self.assertEqual(bot.parse_player("搬相").action, "wamove")   # 唔相沖
+
+    def test_move_back_all(self):
+        self._mk("IMG-20260923-WA0001.jpg")
+        self._mk("IMG-20260923-WA0002.jpg", dt.datetime(2026, 9, 23, 6, 30))
+        r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)
+        self.assertIn("搬咗 2/2", r)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-20260923-WA0001.jpg")))
+        self.assertEqual(os.listdir(self.tmp), [])                    # 全數搬走
+
+    def test_collision_suffix(self):
+        self._mk("IMG-20260923-WA0001.jpg")
+        with open(os.path.join(self.dest, "IMG-20260923-WA0001.jpg"), "wb") as f:
+            f.write(b"old")
+        r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)
+        self.assertIn("搬咗 1/1", r)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "IMG-20260923-WA0001-1.jpg")))
+
+    def test_preview_and_empty_and_missing(self):
+        self._mk("a.jpg")
+        r = bot._wa_return(self.now, preview=True, src=self.tmp, dest_root=self.dest)
+        self.assertIn("冇郁任何相", r)
+        self.assertEqual(len(os.listdir(self.dest)), 0)
+        r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)  # 搬完再搬
+        # a.jpg 已走，tmp 空
+        self._mk("b.jpg")
+        os.remove(os.path.join(self.tmp, "b.jpg"))
+        r = bot._wa_return(self.now, src=self.tmp, dest_root=self.dest)
+        self.assertIn("冇相", r)
+        r = bot._wa_return(self.now, src="/no/such/dir_xyz", dest_root=self.dest)
+        self.assertIn("搵唔到 WA_Night", r)
 
 
 class TestPlaylistCache(unittest.TestCase):
