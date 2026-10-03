@@ -4089,6 +4089,48 @@ class TestTimerLabelCollision(unittest.TestCase):
 
 
 
+class TestSeriesEvery(unittest.TestCase):
+    """連環鬧（2026-10-03 用戶令）：裸寫法都收；每x 支持小時＋中文數字。"""
+
+    def test_bare_range_every_two_hours(self):
+        p = bot.parse_player("2305-0705 每兩小時 報更")
+        self.assertEqual(p.action, "series")
+        self.assertEqual((p.hour, p.minute, p.hour2, p.minute2), (23, 5, 7, 5))
+        self.assertEqual(p.seconds, 7200)
+        self.assertEqual(p.ref, "報更")
+
+    def test_daily_prefix_still_daily(self):
+        p = bot.parse_player("每日 2305-0705 每兩小時 報更")
+        self.assertEqual(p.action, "series_daily")
+        self.assertEqual(p.seconds, 7200)
+
+    def test_regression_prefixed_minutes(self):
+        p = bot.parse_player("鬧鐘 2100-0000 每90分鐘 報更")
+        self.assertEqual(p.action, "series")
+        self.assertEqual((p.hour, p.minute, p.hour2, p.minute2), (21, 0, 0, 0))
+        self.assertEqual(p.seconds, 5400)
+
+    def test_hour_unit_and_cn_numerals(self):
+        p = bot.parse_player("2305-0705 每三小時 報更")
+        self.assertEqual(p.seconds, 10800)
+        p = bot.parse_player("2305-0705 每二十分鐘 報更")
+        self.assertEqual(p.seconds, 1200)
+        p = bot.parse_player("2305-0705 每半小时 報更")     # 半 未支援
+        self.assertIsNone(p)
+        p = bot.parse_player("2305-0705 每1.5小時 報更")
+        self.assertEqual(p.seconds, 5400)
+
+    def test_no_every_is_not_series(self):
+        self.assertIsNone(bot.parse_player("2305-0705 報更"))
+
+    def test_two_line_merge_with_hours(self):
+        merged = bot._merge_series_lines(["計時 2100-0000", "每2小時 報更"])
+        self.assertEqual(len(merged), 1)
+        p = bot.parse_player(merged[0])
+        self.assertEqual(p.action, "series")
+        self.assertEqual(p.seconds, 7200)
+
+
 class TestTTS(unittest.TestCase):
     """通知語音化：termux-tts-speak 廣東話讀出下一個任務（連機都唔使睇）。"""
 

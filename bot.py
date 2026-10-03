@@ -400,11 +400,44 @@ _PREFIX_TIMER = re.compile(r"^/?(?:計時到|倒數到|計時|计时|timer|count
 _PREFIX_ALARM = re.compile(r"^/?(?:鬧鐘|闹钟|alarm)", re.IGNORECASE)
 
 
+_CN_DIG = {"一": 1, "二": 2, "兩": 2, "两": 2, "三": 3, "四": 4,
+           "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_EVERY_NUM = r"(\d+(?:\.\d+)?|[一二兩两三四五六七八九十]+)"
+_EVERY_UNIT = r"(小時|小时|分鐘|分钟|分|min|hours?|hr|h)"
+
+
+def _cn_num(tok: str) -> float | None:
+    """中文數字→數值：一~九、兩、十、X十、X十Y。"""
+    if tok in _CN_DIG:
+        return float(_CN_DIG[tok])
+    if tok == "十":
+        return 10.0
+    m = re.fullmatch(r"([一二兩两三四五六七八九])?十([一二三四五六七八九])?", tok)
+    if m:
+        tens = _CN_DIG.get(m.group(1), 1) if m.group(1) else 1
+        return float(tens * 10 + (_CN_DIG[m.group(2)] if m.group(2) else 0))
+    return None
+
+
+def _every_minutes(num_tok: str, unit: str) -> float | None:
+    """「每X 單位」→ 分鐘數；唔識解回 None。"""
+    if num_tok[0].isdigit():
+        n = float(num_tok)
+    else:
+        cn = _cn_num(num_tok)
+        if cn is None:
+            return None
+        n = cn
+    if unit in ("小時", "小时") or unit.startswith("h"):
+        n *= 60
+    return n
+
+
 _SERIES_RANGE = re.compile(
     r"^(每日|每天|everyday)?\s*(?:鬧鐘|闹钟|alarm|計時|计时|timer)\s+"
     r"\d{1,2}:?\d{2}\s*[-–—~至到]\s*\d{1,2}:?\d{2}$", re.IGNORECASE)
 _SERIES_EVERY = re.compile(
-    r"^每\s*\d+(?:\.\d+)?\s*(?:分鐘|分钟|分|min)\s*\S*$", re.IGNORECASE)
+    r"^每\s*" + _EVERY_NUM + r"\s*" + _EVERY_UNIT + r"\s*\S*$", re.IGNORECASE)
 
 
 def _merge_series_lines(lines: list) -> list:
@@ -664,20 +697,23 @@ def parse_player(text: str) -> PlayerCmd | None:
             return PlayerCmd("sched_alarm_daily", hour=sh, minute=sm,
                              ref=m.group(4).strip())
         return None
-    # 連環鬧：[每日] 鬧鐘/計時 hhmm-hhmm 每x分鐘 [文字]
+    # 連環鬧：[每日] [鬧鐘/計時] hhmm-hhmm 每x[分鐘/小時] [文字]
+    # 2026-10-03 用戶令：裸寫法（冇每日/鬧鐘前綴）都收；單位加小時；中文數字（每兩小時）
     m = re.match(r"^(每日|每天|everyday)?\s*(?:鬧鐘|闹钟|alarm|計時|计时|timer)?\s*"
                  r"(\d{1,2}):?(\d{2})\s*[-–—~至到]\s*(\d{1,2}):?(\d{2})\s*"
-                 r"每\s*(\d+(?:\.\d+)?)\s*(?:分鐘|分钟|分|min)\s*(.*)$", s, re.IGNORECASE)
-    if m and (m.group(1) or m.group(2)):
+                 r"每\s*" + _EVERY_NUM + r"\s*" + _EVERY_UNIT + r"\s*(.*)$",
+                 s, re.IGNORECASE)
+    if m:
         sh, sm = int(m.group(2)), int(m.group(3))
         eh, em = int(m.group(4)), int(m.group(5))
-        x = float(m.group(6))
-        if (sh <= 23 and sm <= 59 and eh <= 23 and em <= 59
+        x = _every_minutes(m.group(6), m.group(7))
+        if (x is not None
+                and sh <= 23 and sm <= 59 and eh <= 23 and em <= 59
                 and (eh, em) != (sh, sm) and 1 <= x <= 24 * 60):
             # end < start＝過午夜（例 2100-0000 報更），window 開去第二日
             return PlayerCmd("series_daily" if m.group(1) else "series",
                               hour=sh, minute=sm, hour2=eh, minute2=em,
-                              seconds=int(x * 60), ref=m.group(7).strip())
+                              seconds=int(x * 60), ref=m.group(8).strip())
         return None
     # 每日 hhmm <計時 時長 | [隨機]播> [名/連結/標籤]
     m = re.match(r"^(?:每日|每天|everyday)\s*", s, re.IGNORECASE)
