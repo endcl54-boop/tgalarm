@@ -102,6 +102,10 @@ PATROL_POSTS = [p.strip() for p in (
     os.environ.get("PATROL_POSTS", "").strip()
     or _read_config_file().get("PATROL_POSTS", "").strip()
     or "Ch,CP1,Platform,T74,T76,T78,T80,T82,T84").split(",") if p.strip()]
+# Gemini 轉播站（2026-10-04 實證：HK 電話直連 Google＝400 location not supported；
+# 經 tailnet 叫沙盒轉播就通。空＝直連（外地網絡先用）
+GEMINI_RELAY = (os.environ.get("GEMINI_RELAY", "").strip()
+                or _read_config_file().get("GEMINI_RELAY", "").strip())
 DRY_RUN = os.environ.get("DRY_RUN", "") == "1" or "--dry-run" in sys.argv
 SKIP_UI = (os.environ.get("SKIP_UI") or _read_config_file().get("SKIP_UI", "1")) != "0"
 
@@ -3367,6 +3371,21 @@ def _gemini_classify(img_path: str, posts: list | None = None) -> tuple:
             b64 = base64.b64encode(f.read()).decode()
     except OSError as e:
         return None, f"讀唔到檔：{e}"
+    if GEMINI_RELAY:                                    # 電話（HK）經沙盒轉播
+        body = json.dumps({"b64": b64}).encode()
+        err = ""
+        for _ in range(2):
+            try:
+                req = urllib.request.Request(
+                    GEMINI_RELAY.rstrip("/") + "/classify", data=body,
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=40) as r:
+                    d = json.loads(r.read().decode("utf-8", "replace"))
+                p = d.get("post")
+                return (p if p in posts else None), str(d.get("raw") or "")
+            except Exception as e:
+                err = str(e)
+        return None, err
     prompt = ("香港屋苑保安巡邏相，判斷屬於邊個崗位。只可以回覆以下其中一個代號："
               + "、".join(posts)
               + "。根據相中大廈座數牌／樓層牌／位置特徵判斷；判斷唔到就只回覆：未知。")

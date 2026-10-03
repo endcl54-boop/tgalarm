@@ -1897,10 +1897,12 @@ class TestPatrol(unittest.TestCase):
         self.now = dt.datetime(2026, 9, 23, 14, 0)
         self._key, self._cls = bot.GEMINI_API_KEY, bot._gemini_classify
         self._root, self._posts = bot.PATROL_ROOT, bot.PATROL_POSTS
+        self._relay = bot.GEMINI_RELAY
 
     def tearDown(self):
         bot.GEMINI_API_KEY, bot._gemini_classify = self._key, self._cls
         bot.PATROL_ROOT, bot.PATROL_POSTS = self._root, self._posts
+        bot.GEMINI_RELAY = self._relay
         shutil.rmtree(self.tmp, ignore_errors=True)
         shutil.rmtree(self.dest, ignore_errors=True)
 
@@ -2000,6 +2002,45 @@ class TestPatrol(unittest.TestCase):
             self.assertIsNone(post)
         finally:
             urllib.request.urlopen = old
+
+    def test_relay_path(self):
+        import urllib.request
+        bot.GEMINI_API_KEY = "X"
+        bot.GEMINI_RELAY = "http://100.125.56.83:8787/"
+        holder = []
+
+        class R:
+            payload = json.dumps({"post": "T74", "raw": "T74"}).encode()
+
+            def read(self_):
+                return self_.payload
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+
+        def fake_urlopen(req, timeout=40):
+            holder.append(req)
+            return R()
+        oldu = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        oldposts = bot.PATROL_POSTS
+        bot.PATROL_POSTS = ["T74", "CP1"]
+        try:
+            p = self._mk(self.tmp, "x.jpg", dt.datetime(2026, 9, 23, 9, 5))
+            post, raw = bot._gemini_classify(p)
+            self.assertEqual((post, raw), ("T74", "T74"))
+            self.assertTrue(str(holder[0].full_url).endswith("/classify"))
+            # 轉播回未知 → None
+            R.payload = json.dumps({"post": None, "raw": "未知"}).encode()
+            post, raw = bot._gemini_classify(p)
+            self.assertIsNone(post)
+            self.assertEqual(raw, "未知")
+        finally:
+            urllib.request.urlopen = oldu
+            bot.PATROL_POSTS = oldposts
 
     def test_gemini_classify_no_key_and_error(self):
         bot.GEMINI_API_KEY = ""
