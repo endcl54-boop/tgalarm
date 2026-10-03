@@ -144,7 +144,7 @@ HELP = (
     "・播 [名/連結]　・隨機播 [名]　・停　・2130 播 [名]\n"
     "・每日 0700 播 [名] 隨機　・每日 0900 計時 25分鐘（計時排程）\n"
     "・歌單 名 連結（儲存）　・歌單/排程（列表）\n"
-    "・管理：取消 N・暫停 N・繼續 N・改 N 1830（同時間新排程會自動取代）\n"
+    "・管理：取消 N・暫停 N・繼續 N・暫停排程＝全部停・繼續排程＝全部恢復・改 N 1830\n"
     "🧭 導航（Google Maps）：\n"
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
@@ -566,6 +566,12 @@ def parse_player(text: str) -> PlayerCmd | None:
         return PlayerCmd("cancel", job_id=int(m.group(1)))
     if re.fullmatch(r"/?取消全部(?:播|排程)?", s, re.IGNORECASE):
         return PlayerCmd("cancel_all")
+    if re.fullmatch(r"/?(?:暫停|暫停播|停用)\s*(?:排程|全部|所有)"
+                    r"|/?(?:全部|所有)\s*(?:暫停|停用)(?:播)?", s, re.IGNORECASE):
+        return PlayerCmd("pause_all")
+    if re.fullmatch(r"/?(?:繼續|恢復)\s*(?:排程|全部|所有)"
+                    r"|/?(?:全部|所有)\s*(?:繼續|恢復)(?:播)?", s, re.IGNORECASE):
+        return PlayerCmd("resume_all")
     m = re.fullmatch(r"(?:暫停|暫停播|停用)\s*#?(\d+)", s, re.IGNORECASE)
     if m:
         return PlayerCmd("pause", job_id=int(m.group(1)))
@@ -2346,7 +2352,8 @@ def _fmt_jobs(now: dt.datetime) -> str:
             nxt = dt.datetime.fromisoformat(j["next"])
             state = f"→ {day_label(nxt, now)} {nxt:%H:%M}"
         lines.append(f"#{j['id']} {icon}{kind} {j['hh']:02d}:{j['mm']:02d} {_fmt_job_content(j)} {state}")
-    lines.append("管理：取消 N・暫停 N・繼續 N・改 N <時間/每日/一次/歌單/時長>")
+    lines.append("管理：取消 N・暫停 N・繼續 N・改 N <時間/每日/一次/歌單/時長>"
+                 "・暫停排程＝全部停・繼續排程＝全部恢復")
     return "\n".join(lines)
 
 
@@ -3079,6 +3086,26 @@ def _resume_job(jid: int, now: dt.datetime):
     return None
 
 
+def _pause_all() -> tuple:
+    """全部暫停。回傳 (新暫停數, 排程總數)。已暫停嘅唔計入新暫停。"""
+    jobs = _jobs()
+    n = 0
+    for j in jobs:
+        if _pause_job(j["id"]) is True:
+            n += 1
+    return n, len(jobs)
+
+
+def _resume_all(now: dt.datetime) -> int:
+    """全部恢復（淨處理暫停緊嘅；在行緊嘅唔會郁）。回傳恢復數。"""
+    paused = [j["id"] for j in _jobs() if j.get("paused")]
+    n = 0
+    for jid in paused:
+        if _resume_job(jid, now) is not None:
+            n += 1
+    return n
+
+
 def _edit_job(jid: int, body: str, now: dt.datetime) -> tuple:
     """就地修改排程：hhmm 改時間・每日/一次 改循環・歌單[隨機]/時長 改內容。"""
     jobs = _jobs()
@@ -3546,6 +3573,18 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         if nxt is None:
             return f"搵唔到 #{cmd.job_id}。send「排程」睇編號"
         return f"▶️ 已恢復 #{cmd.job_id}（{day_label(nxt, now)} {nxt:%H:%M} 觸發）"
+    if a == "pause_all":
+        n, total = _pause_all()
+        if total == 0:
+            return "而家冇排程。"
+        if n == 0:
+            return "全部排程都暫停緊。"
+        return f"⏸ 已暫停全部排程（{n} 個；「繼續排程」一次過恢復）"
+    if a == "resume_all":
+        n = _resume_all(now)
+        if n == 0:
+            return "冇暫停緊嘅排程。"
+        return f"▶️ 已恢復 {n} 個排程"
     if a == "edit":
         ok, info = _edit_job(cmd.job_id, cmd.ref, now)
         return f"✏️ #{cmd.job_id}：{info}" if ok else f"❌ {info}"

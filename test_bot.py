@@ -4131,6 +4131,62 @@ class TestSeriesEvery(unittest.TestCase):
         self.assertEqual(p.seconds, 7200)
 
 
+class TestPauseAllResumeAll(unittest.TestCase):
+    """全局暫停／繼續排程（2026-10-03 用戶令）：暫停排程＝全部停、繼續排程＝全部恢復。"""
+
+    def test_parse_global_and_perjob(self):
+        for t in ["暫停排程", "暫停全部", "全部暫停", "暫停所有", "/暫停排程"]:
+            self.assertEqual(bot.parse_player(t).action, "pause_all", t)
+        for t in ["繼續排程", "恢復排程", "繼續全部", "全部恢復", "/繼續排程"]:
+            self.assertEqual(bot.parse_player(t).action, "resume_all", t)
+        # 單任務文法照舊
+        self.assertEqual(bot.parse_player("暫停 3").action, "pause")
+        self.assertEqual(bot.parse_player("繼續 #3").action, "resume")
+
+    def test_pause_all_then_resume_all(self):
+        old_j, old_save, old_arm = bot.JOBS_PATH, bot._save_json, bot._arm
+        old_jobs, old_ri = bot._jobs, bot.run_intent
+        store = []
+        bot._jobs = lambda: store
+        bot._save_json = lambda p, d: None
+        bot.JOBS_PATH = "/tmp/nonexistent_jobs_pause_all.json"
+        bot._arm = lambda j: None
+        bot.run_intent = lambda cmd, t=0: (True, "OK")
+        try:
+            now = dt.datetime(2026, 10, 3, 12, 0)
+            store.append({"id": 1, "type": "timer", "hh": 13, "mm": 0,
+                          "label": "A", "chat_id": 1, "daily": True,
+                          "next": "2026-10-03T13:00:00"})
+            store.append({"id": 2, "type": "alarm", "hh": 14, "mm": 30,
+                          "label": "B", "chat_id": 1, "daily": False,
+                          "next": "2026-10-03T14:30:00"})
+            # 全部暫停
+            r = bot._execute_player(bot.PlayerCmd("pause_all"), 1, now)
+            self.assertIn("已暫停全部", r)
+            self.assertIn("2", r)
+            self.assertTrue(all(j.get("paused") for j in store))
+            # 再停 → 全部暫停緊
+            r = bot._execute_player(bot.PlayerCmd("pause_all"), 1, now)
+            self.assertIn("都暫停緊", r)
+            # 全部恢復
+            r = bot._execute_player(bot.PlayerCmd("resume_all"), 1, now)
+            self.assertIn("已恢復 2 個", r)
+            self.assertFalse(any(j.get("paused") for j in store))
+            self.assertTrue(all(j["next"].startswith("2026-10-03T1") for j in store))
+            # 再恢復 → 冇暫停緊
+            r = bot._execute_player(bot.PlayerCmd("resume_all"), 1, now)
+            self.assertIn("冇暫停緊", r)
+            # 恢復唔會郁在行緊 job 嘅 next
+            self.assertEqual(store[0]["next"], "2026-10-03T13:00:00")
+            # 空表
+            store.clear()
+            r = bot._execute_player(bot.PlayerCmd("pause_all"), 1, now)
+            self.assertIn("冇排程", r)
+        finally:
+            bot.JOBS_PATH, bot._save_json, bot._arm = old_j, old_save, old_arm
+            bot._jobs, bot.run_intent = old_jobs, old_ri
+
+
 class TestTTS(unittest.TestCase):
     """通知語音化：termux-tts-speak 廣東話讀出下一個任務（連機都唔使睇）。"""
 
