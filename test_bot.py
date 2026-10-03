@@ -1648,6 +1648,87 @@ class TestWaMove(unittest.TestCase):
         self.assertEqual(s, dt.datetime(2026, 9, 22, 23, 0))
         self.assertEqual(e, dt.datetime(2026, 9, 23, 7, 0))
 
+    # ── 自訂時段（2026-10-02 用戶令：當日或跨夜任何時段）──
+    def test_recent_window_same_day(self):
+        W = bot._wa_recent_window
+        # 14:00 問 0900-1200 → 今日個窗（已完成）
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 14, 0), 9, 0, 12, 0),
+                         (dt.datetime(2026, 9, 23, 9, 0), dt.datetime(2026, 9, 23, 12, 0)))
+        # 10:00 問 0900-1200 → 今日個窗（進行中，end 可以大過 now）
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 10, 0), 9, 0, 12, 0),
+                         (dt.datetime(2026, 9, 23, 9, 0), dt.datetime(2026, 9, 23, 12, 0)))
+        # 08:00 問 0900-1200 → 尋日個窗（最近完成）
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 8, 0), 9, 0, 12, 0),
+                         (dt.datetime(2026, 9, 22, 9, 0), dt.datetime(2026, 9, 22, 12, 0)))
+
+    def test_recent_window_cross_midnight(self):
+        W = bot._wa_recent_window
+        # 11:00 問 2300-0700 → 尋晚23 → 今朝07
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 11, 0), 23, 0, 7, 0),
+                         (dt.datetime(2026, 9, 22, 23, 0), dt.datetime(2026, 9, 23, 7, 0)))
+        # 23:30 問 2300-0700 → 今晚23 → 明朝07（進行中）
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 23, 30), 23, 0, 7, 0),
+                         (dt.datetime(2026, 9, 23, 23, 0), dt.datetime(2026, 9, 24, 7, 0)))
+        # 有分鐘：0130 問 0100 0230 → 今日01:00→02:30
+        self.assertEqual(W(dt.datetime(2026, 9, 23, 1, 30), 1, 0, 2, 30),
+                         (dt.datetime(2026, 9, 23, 1, 0), dt.datetime(2026, 9, 23, 2, 30)))
+        # 起＝終 → 拒絕
+        self.assertIsNone(W(self.now, 9, 0, 9, 0))
+
+    def test_parse_custom_range(self):
+        p = bot.parse_player("搬相 0900 1200")
+        self.assertEqual(p.action, "wamove")
+        self.assertEqual(p.extra, "9 0 12 0")
+        self.assertNotEqual(p.ref, "preview")
+        p = bot.parse_player("搬相預覽 2300 0700")
+        self.assertEqual(p.ref, "preview")
+        self.assertEqual(p.extra, "23 0 7 0")
+        p = bot.parse_player("搬相 9:30 11:45")
+        self.assertEqual(p.extra, "9 30 11 45")
+        p = bot.parse_player("搬相 0900 1200 預覽")
+        self.assertEqual(p.ref, "preview")
+        self.assertEqual(p.extra, "9 0 12 0")
+        # 淨「搬相」照舊
+        self.assertEqual(bot.parse_player("搬相").extra, "")
+        self.assertEqual(bot.parse_player("搬相預覽").ref, "preview")
+        # 壞範圍 → bad
+        self.assertEqual(bot.parse_player("搬相 0900").ref, "bad")
+        self.assertEqual(bot.parse_player("搬相 2500 1200").ref, "bad")
+        self.assertEqual(bot.parse_player("搬相 0900 1200 1500").ref, "bad")
+
+    def test_move_custom_same_day(self):
+        self._mk(self.sent, "a.jpg", dt.datetime(2026, 9, 22, 10, 0))
+        self._mk(self.sent, "b.jpg", dt.datetime(2026, 9, 23, 9, 30))
+        self._mk(self.sent, "c.jpg", dt.datetime(2026, 9, 23, 23, 30))   # 窗外
+        now = dt.datetime(2026, 9, 23, 14, 0)
+        win = bot._wa_recent_window(now, 9, 0, 12, 0)                    # 今日 09–12
+        r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
+        self.assertIn("時段 09-23 09:00 → 09-23 12:00", r)
+        self.assertIn("搬咗 1/1", r)
+        self.assertTrue(os.path.exists(os.path.join(self.dest, "b.jpg")))
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "a.jpg")))  # 尋日唔搬
+
+    def test_move_custom_cross_midnight(self):
+        self._mk(self.sent, "n1.jpg", dt.datetime(2026, 9, 22, 23, 30))
+        self._mk(self.sent, "n2.jpg", dt.datetime(2026, 9, 23, 6, 59))
+        self._mk(self.sent, "d.jpg", dt.datetime(2026, 9, 23, 12, 0))    # 窗外
+        now = dt.datetime(2026, 9, 23, 11, 0)
+        win = bot._wa_recent_window(now, 23, 0, 7, 0)
+        r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
+        self.assertIn("09-22 23:00 → 09-23 07:00", r)
+        self.assertIn("搬咗 2/2", r)
+
+    def test_execute_bad_range_hint(self):
+        r = bot._execute_player(bot.PlayerCmd("wamove", ref="bad"), 12345, self.now)
+        self.assertIn("用法", r)
+        self.assertIn("搬相 0900 1200", r)
+
+    def test_move_custom_empty_window(self):
+        now = dt.datetime(2026, 9, 23, 14, 0)
+        win = bot._wa_recent_window(now, 2, 0, 3, 0)                     # 凌晨，冇相
+        r = bot._wa_move(now, src_root=self.tmp, dest=self.dest, window=win)
+        self.assertIn("冇相，唔使搬", r)
+
     # ── 目錄偵測 ──
     def test_dirs_include_sent(self):
         ds = bot._wa_dirs(self.tmp)

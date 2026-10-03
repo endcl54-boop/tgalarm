@@ -23,10 +23,12 @@ tgalarm — Telegram 鬧鐘・計時器機械人（Android Termux 直連系統�
 時間分配快進：
     完成 / 早完成        提早做完而家呢段 → 即刻快進下一階段（舊倒計時撳停就得）
 
-WhatsApp 夜更相（純 Python，毫秒内動作）：
+WhatsApp 相搬移（純 Python，毫秒内動作）：
     搬相                  將最近夜更時段（23:00–07:00）WhatsApp 相（包自己傳出 Sent
                           嘅）搬去系統相簿 WA_Night；防撞名自動加 -1 -2…
     搬相預覽              齋列出符合嘅相，唔郁真身
+    搬相 HHMM HHMM        自訂任何時段（當日 0900 1200／跨夜 2300 0700），
+                          之後加「預覽」都食——搬最近一次出現嘅嗰個窗
 
 設定來源（優先次序：環境變數 > ~/.tgalarm/config）：
     BOT_TOKEN          必填，向 @BotFather 申請（setup.sh 會問你一次）
@@ -154,7 +156,7 @@ HELP = (
     "・1930至2230 分配 留空10% 温習x2、做功課、沖涼\n"
     "・留空可寫%或分鐘（留空30分鐘），唔寫都得；加「每日」喺頭=日日咁玩；x2=佔兩份時間，冇寫=一份\n"
     "🔊 語音：全線任務到點廣東話旁白・下一個（隨問隨讀）・講 [文字]\n🩺 深夜冇反應/遲響？send「自檢」驗證；「修復」即彈保障設定頁\n"
-    "🌙 夜更相：「搬相」將 WhatsApp 夜更時段（23:00–07:00，包自己傳出嘅）搬去 WA_Night 相簿；「搬相預覽」齋睇唔搬\n"
+    "🌙 搬相：「搬相」搬最近夜更時段（23:00–07:00，包自己傳出嘅）去 WA_Night 相簿；「搬相 HHMM HHMM」自訂任何時段（當日 0900 1200／跨夜 2300 0700）；「搬相預覽」齋睇唔搬\n"
     "⏩ 分配快進：「完成」提早做完而家呢段即刻入下階段；最後段就提早收工"
     "\n🧠 問 Google AI：「ai 點樣由旺角去銅鑼灣？」或「問 明天適合洗車嗎」"
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
@@ -463,6 +465,7 @@ class PlayerCmd:
                              # pause/resume/edit
     ref: str = ""
     url: str = ""
+    extra: str = ""          # wamove：自訂時段「sh sm eh em」（parse 驗證後嘅四個整數）
     hour: int | None = None
     minute: int | None = None
     job_id: int | None = None
@@ -499,10 +502,28 @@ def parse_player(text: str) -> PlayerCmd | None:
     s = re.sub(r"\s+", " ", text.strip())
     if re.fullmatch(r"/?(?:完成|完成咗|早完成|提早完成|下一階段|下階段|跳過|skip|next)\s*[！!]?", s, re.IGNORECASE):
         return PlayerCmd("alloc_done")
-    if re.fullmatch(r"/?搬(?:whatsapp|wa)?相", s, re.IGNORECASE):
-        return PlayerCmd("wamove")
-    if re.fullmatch(r"/?搬(?:whatsapp|wa)?相\s*(?:預覽|preview|list)", s, re.IGNORECASE):
-        return PlayerCmd("wamove", ref="preview")
+    m = re.fullmatch(r"/?搬(?:whatsapp|wa)?相\s*(.*)", s, re.IGNORECASE)
+    if m:
+        rest = m.group(1).strip()
+        preview = False
+        m2 = re.match(r"^(?:預覽|preview|list)\s+(.*)$", rest, re.IGNORECASE)
+        if m2:                                  # 「搬相 預覽 HHMM HHMM」
+            preview, rest = True, m2.group(1)
+        else:
+            m2 = re.search(r"\s+(?:預覽|preview|list)$", rest, re.IGNORECASE)
+            if m2:                              # 「搬相 HHMM HHMM 預覽」
+                preview, rest = True, rest[:m2.start()]
+            elif re.fullmatch(r"(?:預覽|preview|list)", rest, re.IGNORECASE):
+                preview, rest = True, ""        # 「搬相預覽」
+        toks = rest.split()
+        if not toks:                            # 淨「搬相」／「搬相預覽」＝夜更
+            return PlayerCmd("wamove", ref="preview" if preview else "")
+        if len(toks) == 2:                      # 2026-10-02 用戶令：任何時段
+            t0, t1 = _read_hhmm_of(toks[0]), _read_hhmm_of(toks[1])
+            if t0 and t1:
+                return PlayerCmd("wamove", ref="preview" if preview else "",
+                                 extra=f"{t0[0]} {t0[1]} {t1[0]} {t1[1]}")
+        return PlayerCmd("wamove", ref="bad")
     if re.fullmatch(r"/?(?:停|停止|停播|stop)", s, re.IGNORECASE):
         return PlayerCmd("stop")
     if re.fullmatch(r"/?(?:播程|排程|播放日程|日程|jobs)", s, re.IGNORECASE):
@@ -3193,6 +3214,28 @@ def _wa_night_window(now: dt.datetime) -> tuple:
     return start, end
 
 
+def _wa_recent_window(now: dt.datetime, sh: int, sm: int, eh: int, em: int):
+    """自訂時段：最近一次出現嘅 (start→end) 窗（[start, end)）。
+
+    當日窗（起<終，如 0900→1200）：今日未到終點就用尋日嗰個；
+    跨夜窗（起>終，如 2300→0700）：過咗起點就當今晚進行中。
+    起＝終 → None（語意不明，拒絕）。"""
+    if (sh, sm) == (eh, em):
+        return None
+    if (sh, sm) < (eh, em):                     # 當日窗
+        start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+        if now < start:                         # 今日未開始 → 尋日嗰個窗
+            start -= dt.timedelta(days=1)
+            end -= dt.timedelta(days=1)
+        return start, end                       # 已完成或進行中都用今日
+    start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    if now < start:                             # 未到今日起點 → 尋晚嗰個
+        start -= dt.timedelta(days=1)
+    end = (start + dt.timedelta(days=1)).replace(hour=eh, minute=em)
+    return start, end
+
+
 def _wa_scan(dirs: list, start: dt.datetime, end: dt.datetime) -> list:
     """每個 dir 第一層、jpg/jpeg、mtime 落喺 [start, end) → [(ts, path)]，按時間排序。"""
     s_ep, e_ep = start.timestamp(), end.timestamp()
@@ -3218,20 +3261,27 @@ def _wa_scan(dirs: list, start: dt.datetime, end: dt.datetime) -> list:
 
 
 def _wa_move(now: dt.datetime, preview: bool = False,
-             src_root: str | None = None, dest: str | None = None) -> str:
-    """搬相主體：掃 →（預覽）列／真搬，兼防撞名。回傳畀用戶嘅訊息。"""
+             src_root: str | None = None, dest: str | None = None,
+             window: tuple | None = None) -> str:
+    """搬相主體：掃 →（預覽）列／真搬，兼防撞名。回傳畀用戶嘅訊息。
+
+    window=None＝最近夜更時段（23:00–07:00）；否則 (start, end) 自訂時段
+    （2026-10-02 用戶令：當日或跨夜任何時段）。"""
     dirs = _wa_dirs(src_root)
     if not dirs:
         return ("❌ 搵唔到 WhatsApp Images 資料夾。\n"
                 "先喺 Termux 行：termux-setup-storage（撳「允許」儲存權限），再 send「搬相」")
     dest = dest or _WA_DEST
-    start, end = _wa_night_window(now)
+    custom = window is not None
+    head = "時段" if custom else "夜更時段"
+    icon = "📁" if custom else "🌙"
+    start, end = window if custom else _wa_night_window(now)
     hits = _wa_scan(dirs, start, end)
     span = f"{start:%m-%d %H:%M} → {end:%m-%d %H:%M}"
     if not hits:
-        return f"✅ 夜更時段（{span}）冇相，唔使搬。"
+        return f"✅ {head}（{span}）冇相，唔使搬。"
     sent_n = sum(1 for _, p in hits if "/Sent/" in p or "/Outgoing/" in p)
-    lines = [f"🌙 夜更時段 {span}，共 {len(hits)} 張（其中自己傳出 {sent_n} 張）："]
+    lines = [f"{icon} {head} {span}，共 {len(hits)} 張（其中自己傳出 {sent_n} 張）："]
     for ts, path in hits[:8]:
         tag = "↗" if "/Sent/" in path or "/Outgoing/" in path else "↘"
         lines.append(f"  {tag}[{dt.datetime.fromtimestamp(ts):%m-%d %H:%M}] {os.path.basename(path)}")
@@ -3271,7 +3321,17 @@ def _wa_move(now: dt.datetime, preview: bool = False,
 def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
     a = cmd.action
     if a == "wamove":
-        return _wa_move(now, preview=(cmd.ref == "preview"))
+        if cmd.ref == "bad":
+            return ("❓ 用法：「搬相 HHMM HHMM」自訂任何時段——當日"
+                    "（例：搬相 0900 1200）或跨夜（例：搬相 2300 0700）都得；"
+                    "淨「搬相」＝最近夜更時段。加「預覽」＝齋睇唔搬")
+        win = None
+        if cmd.extra:
+            sh, sm, eh, em = (int(x) for x in cmd.extra.split())
+            win = _wa_recent_window(now, sh, sm, eh, em)
+            if win is None:
+                return "❓ 起同終一樣，唔知你想搬幾耐——例：搬相 0900 1200"
+        return _wa_move(now, preview=(cmd.ref == "preview"), window=win)
     if a == "alloc_done":
         return _alloc_advance(chat_id, now)
     if a == "play":
