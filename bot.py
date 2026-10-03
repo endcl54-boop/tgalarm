@@ -3373,9 +3373,12 @@ def _gemini_classify(img_path: str, posts: list | None = None) -> tuple:
     body = json.dumps({"contents": [{"parts": [
         {"inline_data": {"mime_type": "image/jpeg", "data": b64}},
         {"text": prompt}]}],
-        "generationConfig": {"temperature": 0, "maxOutputTokens": 16}}).encode()
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 200,
+                             "thinkingConfig": {"thinkingBudget": 0}}}).encode()
+    # 2026-10-04 實證：新開 key 食唔到 2.0-flash／2.5-flash／2.5-pro（「no longer
+    # available to new users」）；2.5 家族淨 2.5-flash-lite 通（models list 實證）
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
-           "gemini-2.0-flash:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY))
+           "gemini-2.5-flash-lite:generateContent?key=" + urllib.parse.quote(GEMINI_API_KEY))
     err = ""
     for _ in range(2):                                  # 出錯重試一次
         try:
