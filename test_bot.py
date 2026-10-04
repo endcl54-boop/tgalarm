@@ -4202,6 +4202,13 @@ class TestWaitWall(unittest.TestCase):
         self.assertIn("💧", r)
         self.assertIn("🎯", r)
         self.assertIn("每30分 飲水", r)
+        # 排定日期 job 有自己 icon（唔好跌返 🎵）
+        bot._add_simple_job(1, {"type": "sched_pause", "ids": [3], "label": "x",
+                                "hh": 0, "mm": 5, "chat_id": 1,
+                                "next": "2026-10-05T00:05:00"})
+        r2 = bot._fmt_jobs(now)
+        self.assertIn("⏸一次 00:05 排定暫停排程：#3", r2)
+        self.assertIn("mmdd 暫停/繼續排程", r2)
 
 
 class TestSeriesWindow(unittest.TestCase):

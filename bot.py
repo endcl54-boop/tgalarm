@@ -2377,7 +2377,8 @@ def _fmt_jobs(now: dt.datetime) -> str:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
                 "bell": "⏰", "weather": "🌤", "web": "🌐", "nag": "💧",
-                "focus": "🎯", "battery": "🔋"}.get(j.get("type"), "🎵")
+                "focus": "🎯", "battery": "🔋",
+                "sched_pause": "⏸", "sched_resume": "▶️"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
         else:
@@ -2385,7 +2386,8 @@ def _fmt_jobs(now: dt.datetime) -> str:
             state = f"→ {day_label(nxt, now)} {nxt:%H:%M}"
         lines.append(f"#{j['id']} {icon}{kind} {j['hh']:02d}:{j['mm']:02d} {_fmt_job_content(j)} {state}")
     lines.append("管理：取消 N・暫停 N・繼續 N・改 N <時間/每日/一次/歌單/時長>"
-                 "・暫停排程＝全部停・繼續排程＝全部恢復")
+                 "・暫停排程＝全部停・繼續排程＝全部恢復"
+                 "・mmdd 暫停/繼續排程 N＝排定日期")
     return "\n".join(lines)
 
 
