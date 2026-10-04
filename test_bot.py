@@ -2076,6 +2076,114 @@ class TestPatrol(unittest.TestCase):
         self.assertEqual(os.listdir(t74), [])
 
 
+class TestSchedPauseDate(unittest.TestCase):
+    """排定日期暫停／繼續（2026-10-04 用戶令）：mmdd 暫停排程 x／mmdd 繼續排程 x。"""
+
+    def setUp(self):
+        self.now = dt.datetime(2026, 10, 4, 12, 0)
+        self._jobs, self._save, self._add = bot._jobs, bot._save_json, bot._add_simple_job
+        self._send = bot._send_safe
+        store = [{"id": 1, "type": "timer", "hh": 13, "mm": 0, "label": "A",
+                  "chat_id": 1, "daily": True, "next": "2026-10-04T13:00:00"},
+                 {"id": 2, "type": "alarm", "hh": 14, "mm": 30, "label": "B",
+                  "chat_id": 1, "daily": False, "next": "2026-10-04T14:30:00"}]
+        self.store = store
+        bot._jobs = lambda: store
+        bot._save_json = lambda p, d: None
+        self._arm, self._tasks = bot._arm, dict(bot._TASKS)
+        bot._arm = lambda j: None          # _resume_job 會 arm——唔准種真 task
+        bot._TASKS = {}                    # 隔離：唔好掂到第啲測試嘅 pending task
+        self.sent = []
+
+        async def fake_send(cid, text, label=""):
+            self.sent.append(text)
+            return True
+        bot._send_safe = fake_send
+
+    def tearDown(self):
+        bot._jobs, bot._save_json, bot._add = self._jobs, self._save, self._add
+        bot._send_safe = self._send
+        bot._arm, bot._TASKS = self._arm, self._tasks
+
+    def test_parse(self):
+        p = bot.parse_player("1005 暫停排程 3")
+        self.assertEqual((p.action, p.hour, p.minute, p.extra),
+                         ("pause_date", 10, 5, "3"))
+        p = bot.parse_player("1012 繼續排程 3,5")
+        self.assertEqual((p.action, p.hour, p.minute, p.extra),
+                         ("resume_date", 10, 12, "3,5"))
+        p = bot.parse_player("1012 繼續排程")
+        self.assertEqual(p.extra, "")
+        p = bot.parse_player("1005 暫停 3")
+        self.assertEqual(p.action, "pause_date")
+        # 舊文法零沖突
+        self.assertEqual(bot.parse_player("暫停排程").action, "pause_all")
+        self.assertEqual(bot.parse_player("暫停 3").action, "pause")
+
+    def test_future_creates_job(self):
+        # 真 _add_simple_job：_jobs/_save_json/_arm 已 mock，job 會跌入 self.store
+        r = bot._execute_player(bot.PlayerCmd("pause_date", hour=10, minute=5,
+                                              extra="1"), 7, self.now)
+        self.assertIn("🗓 已排定：10月5日 暫停 #1", r)
+        made = [j for j in self.store if j.get("type") == "sched_pause"]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0]["ids"], [1])
+        self.assertTrue(made[0]["next"].startswith("2026-10-05T00:05"))
+        r = bot._execute_player(bot.PlayerCmd("resume_date", hour=10, minute=12,
+                                              extra=""), 7, self.now)
+        self.assertIn("繼續 全部", r)
+        made = [j for j in self.store if j.get("type") == "sched_resume"]
+        self.assertEqual(len(made), 1)
+
+    def test_past_date_rolls_next_year(self):
+        r = bot._execute_player(bot.PlayerCmd("pause_date", hour=9, minute=1,
+                                              extra="1"), 7, self.now)
+        self.assertIn("9月1日（2027）", r)
+        made = [j for j in self.store if j.get("type") == "sched_pause"]
+        self.assertEqual(len(made), 1)
+        self.assertTrue(made[0]["next"].startswith("2027-09-01T00:05"))
+
+    def test_bad_date(self):
+        r = bot._execute_player(bot.PlayerCmd("pause_date", hour=13, minute=40,
+                                              extra="1"), 7, self.now)
+        self.assertIn("日期唔存在", r)
+
+    def test_unknown_id_rejected(self):
+        r = bot._execute_player(bot.PlayerCmd("pause_date", hour=10, minute=5,
+                                              extra="9"), 7, self.now)
+        self.assertIn("搵唔到 #9", r)
+
+    def test_today_immediate(self):
+        r = bot._execute_player(bot.PlayerCmd("pause_date", hour=10, minute=4,
+                                              extra="1"), 7, self.now)
+        self.assertIn("今日（10月4日）已暫停 #1", r)
+        self.assertTrue(self.store[0].get("paused"))
+
+    def test_fire_pause_and_resume(self):
+        loop = asyncio.new_event_loop()
+        try:
+            job = {"id": 50, "type": "sched_pause", "ids": [1, 2],
+                   "chat_id": 7, "hh": 0, "mm": 5,
+                   "next": "2026-10-05T00:05:00"}
+            loop.run_until_complete(bot._fire_later(dict(job), 0))
+            self.assertTrue(all(j.get("paused") for j in self.store))
+            self.assertIn("已暫停 #1、#2", self.sent[-1])
+            job2 = {"id": 51, "type": "sched_resume", "ids": [],
+                    "chat_id": 7, "hh": 0, "mm": 5,
+                    "next": "2026-10-12T00:05:00"}
+            loop.run_until_complete(bot._fire_later(dict(job2), 0))
+            self.assertFalse(any(j.get("paused") for j in self.store))
+            self.assertIn("已恢復 2 個排程", self.sent[-1])
+        finally:
+            loop.close()
+
+    def test_fmt(self):
+        self.assertEqual(bot._fmt_job_content(
+            {"type": "sched_pause", "ids": [3, 5]}), "排定暫停排程：#3、#5")
+        self.assertEqual(bot._fmt_job_content(
+            {"type": "sched_resume", "ids": []}), "排定繼續排程：全部")
+
+
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
 

@@ -161,6 +161,7 @@ HELP = (
     "・每日 0700 播 [名] 隨機　・每日 0900 計時 25分鐘（計時排程）\n"
     "・歌單 名 連結（儲存）　・歌單/排程（列表）\n"
     "・管理：取消 N・暫停 N・繼續 N・暫停排程＝全部停・繼續排程＝全部恢復・改 N 1830\n"
+    "・排定日期：1005 暫停排程 3（10月5日起停 #3）・1012 繼續排程（全部恢復）；號碼可多個/省略\n"
     "🧭 導航（Google Maps）：\n"
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
@@ -587,6 +588,12 @@ def parse_player(text: str) -> PlayerCmd | None:
         return PlayerCmd("cancel", job_id=int(m.group(1)))
     if re.fullmatch(r"/?取消全部(?:播|排程)?", s, re.IGNORECASE):
         return PlayerCmd("cancel_all")
+    m = re.fullmatch(r"/?(\d{4})\s*(暫停|繼續)(?:排程)?(?:播)?\s*([0-9,，、 ]*)", s)
+    if m:
+        # mmdd 暫停/繼續排程 [任務號…]（2026-10-04 用戶令：排定日期生效）
+        return PlayerCmd("pause_date" if m.group(2) == "暫停" else "resume_date",
+                         hour=int(m.group(1)[:2]), minute=int(m.group(1)[2:]),
+                         extra=m.group(3).strip())
     if re.fullmatch(r"/?(?:暫停|暫停播|停用)\s*(?:排程|全部|所有)"
                     r"|/?(?:全部|所有)\s*(?:暫停|停用)(?:播)?", s, re.IGNORECASE):
         return PlayerCmd("pause_all")
@@ -2343,6 +2350,10 @@ def _fmt_job_content(j: dict) -> str:
                 + (f"（{j['label']}）" if j.get("label") else ""))
     if j.get("type") == "battery":
         return f"電量守 ≤{j.get('thr', 20)}%"
+    if j.get("type") in ("sched_pause", "sched_resume"):
+        act = "暫停" if j["type"] == "sched_pause" else "繼續"
+        ids = j.get("ids") or []
+        return f"排定{act}排程：" + ("、".join(f"#{i}" for i in ids) if ids else "全部")
     if j.get("type") == "alloc":
         segs = j.get("segments", [])
         names = "、".join(s["text"] for s in segs)
@@ -2433,6 +2444,28 @@ async def _fire_later(job: dict, delay: float) -> None:
     now = dt.datetime.now()
     jtype = job.get("type", "play")
     defer_msg = False          # nav 彈窗先行時：訊息喺延遲任務送，唔喺度送
+    if jtype in ("sched_pause", "sched_resume"):   # 排定日期暫停/繼續（2026-10-04）
+        ids = job.get("ids") or []
+        if jtype == "sched_pause":
+            if ids:
+                done = [i for i in ids if _pause_job(i) is True]
+                msg = (("⏸（排定）已暫停 " + "、".join(f"#{i}" for i in done))
+                       if done else "⏸（排定）指定任務唔喺度／暫停緊")
+            else:
+                n, _tot = _pause_all()
+                msg = f"⏸（排定）已暫停全部排程（{n} 個）"
+        else:
+            if ids:
+                done = [i for i in ids if _resume_job(i, now) is not None]
+                msg = (("▶️（排定）已恢復 " + "、".join(f"#{i}" for i in done))
+                       if done else "▶️（排定）指定任務唔存在／冇暫停緊")
+            else:
+                n = _resume_all(now)
+                msg = f"▶️（排定）已恢復 {n} 個排程"
+        await _send_safe(job["chat_id"], msg, "排定暫停/繼續")
+        _TASKS.pop(job["id"], None)
+        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+        return
     if jtype == "alloc":
         await _fire_alloc(job)
         return
@@ -3778,6 +3811,48 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         if n == 0:
             return "冇暫停緊嘅排程。"
         return f"▶️ 已恢復 {n} 個排程"
+    if a in ("pause_date", "resume_date"):
+        mm, dd = cmd.hour, cmd.minute
+        try:
+            tgt = now.replace(month=mm, day=dd, hour=0, minute=5,
+                              second=0, microsecond=0)
+        except ValueError:
+            return f"❌ 日期唔存在：{mm:02d}{dd:02d}（例：1005＝10月5日）"
+        if tgt < now.replace(hour=0, minute=0, second=0, microsecond=0):
+            try:
+                tgt = tgt.replace(year=now.year + 1)
+            except ValueError:                     # 0229
+                tgt = tgt.replace(year=now.year + 4)
+        ids = [int(x) for x in re.findall(r"\d+", cmd.extra or "")]
+        if ids:
+            have = {j["id"] for j in _jobs()}
+            missing = [i for i in ids if i not in have]
+            if missing:
+                return ("搵唔到 " + "、".join(f"#{i}" for i in missing)
+                        + "。send「排程」睇編號")
+        act = "暫停" if a == "pause_date" else "繼續"
+        tgt_txt = f"{tgt.month}月{tgt.day}日"
+        if tgt.year > now.year:
+            tgt_txt += f"（{tgt.year}）"
+        tgt_ids = "、".join(f"#{i}" for i in ids) if ids else "全部"
+        if tgt.date() == now.date():               # 今日＝即刻生效
+            if a == "pause_date":
+                if ids:
+                    n = sum(1 for i in ids if _pause_job(i) is True)
+                    return f"⏸ 今日（{tgt_txt}）已暫停 {tgt_ids}（{n} 個）"
+                n, _t = _pause_all()
+                return f"⏸ 今日（{tgt_txt}）已暫停全部排程（{n} 個）"
+            if ids:
+                n = sum(1 for i in ids if _resume_job(i, now) is not None)
+                return f"▶️ 今日（{tgt_txt}）已恢復 {tgt_ids}（{n} 個）"
+            n = _resume_all(now)
+            return f"▶️ 今日（{tgt_txt}）已恢復 {n} 個排程"
+        _add_simple_job(chat_id, {
+            "type": "sched_pause" if a == "pause_date" else "sched_resume",
+            "ids": ids, "label": f"排定{act}", "chat_id": chat_id,
+            "hh": 0, "mm": 5, "next": tgt.isoformat()})
+        return (f"🗓 已排定：{tgt_txt} {act} {tgt_ids}"
+                f"（當日 00:05 生效；「排程」見到，可「取消 N」）")
     if a == "edit":
         ok, info = _edit_job(cmd.job_id, cmd.ref, now)
         return f"✏️ #{cmd.job_id}：{info}" if ok else f"❌ {info}"
