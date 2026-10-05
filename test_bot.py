@@ -4207,7 +4207,10 @@ class TestWaitWall(unittest.TestCase):
                          [("XX:XX:XX:XX:C9:AD", "看什麽看")])
         self.assertEqual(bot._parse_bt_connected(""), [])
         self.assertEqual(bot._parse_bt_battery(adapter),
-                         {"XX:XX:XX:XX:C9:AD": 90})   # 取最後一筆
+                         {"XX:XX:XX:XX:C9:AD": 100})  # 取最後一筆；頂級 9=滿電
+        self.assertEqual(bot._parse_bt_battery(
+            "valString=+IPHONEACCEV=1,1,10, device=XX:XX:XX:XX:C9:AD"),
+            {"XX:XX:XX:XX:C9:AD": 100})               # 防禦：10 都當滿電
         self.assertEqual(bot._parse_bt_battery("garbage"), {})
         old_hl = bot._headset_levels
         try:

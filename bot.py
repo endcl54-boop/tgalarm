@@ -1199,13 +1199,15 @@ def _parse_bt_battery(adapter_out: str) -> dict:
             continue
         vals = toks[1:]
         for i in range(0, min(2 * n, len(vals) - 1), 2):
-            if vals[i] == "1":                     # key 1＝電量（0–9 → ×10%）
+            if vals[i] == "1":                     # key 1＝電量（HFP 十級制）
                 try:
                     lv = int(vals[i + 1])
                 except ValueError:
                     break
-                if 0 <= lv <= 9:
-                    levels[addr] = lv * 10
+                if 0 <= lv <= 10:
+                    # 十級制：頂級=滿電（真機實證 2026-10-05：100% 報 9；
+                    # Sony 官方文檔：10 級顯示 100/70/50/10%——9→100，其餘 ×10）
+                    levels[addr] = 100 if lv >= 9 else lv * 10
                 break
     return levels
 
