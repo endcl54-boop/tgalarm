@@ -1172,11 +1172,11 @@ def _focus_handle(t: str, chat_id: int):
             f"——即刻落第一個計時器。「專注結束」收工")
 
 
-# ---- 電量守（每個鐘查一次，低過門檻警一次）----
+# ---- 電量守（每 10 分鐘查一次，低過門檻又冇充電先警一次）----
 
-# ---- 電量守（每個鐘查一次，低過門檻警一次）----
+# ---- 電量守（每 10 分鐘查一次，低過門檻又冇充電先警一次）----
 
-# ---- 電量守（每個鐘查一次，低過門檻警一次）----
+# ---- 電量守（每 10 分鐘查一次，低過門檻又冇充電先警一次）----
 
 # ---- 藍牙耳機電量守（2026-10-05 用戶令：≤60% 提醒叉電）----
 # 數據源（真機實證 2026-10-05）：①SystemUI dump嘅 mConnectedDevices（邊隻連住）
@@ -3018,7 +3018,7 @@ async def _fire_later(job: dict, delay: float) -> None:
             if j["id"] == job["id"]:
                 j["alerted"] = job.get("alerted", False)
         _save_json(JOBS_PATH, jobs)
-        nxt = now + dt.timedelta(hours=1)
+        nxt = now + dt.timedelta(minutes=10)   # 2026-10-06 改密：一個鐘太空檔（用戶今朝 07:31 拔線前後個案）
         job["next"] = nxt.isoformat()
         for j in jobs:
             if j["id"] == job["id"]:

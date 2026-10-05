@@ -4470,6 +4470,10 @@ class TestWaitWall(unittest.TestCase):
         asyncio.run(bot._fire_later(dict(job), 0))
         self.assertIn("15%", self.seen["msgs"][-1])
         self.assertTrue(bot._jobs()[0]["alerted"])
+        # 2026-10-06：查密做每 10 分鐘（一個鐘空檔太大）
+        gap = (bot.dt.datetime.fromisoformat(bot._jobs()[0]["next"])
+               - bot.dt.datetime.now()).total_seconds()
+        self.assertLessEqual(gap, 601)
         bot._battery_status = lambda: (80, True, 30.0)
         n = len(self.seen["msgs"])
         asyncio.run(bot._fire_later(dict(bot._jobs()[0]), 0))
