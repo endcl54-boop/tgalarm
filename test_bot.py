@@ -3018,19 +3018,33 @@ class TestManualNavConfirm(unittest.TestCase):
 
 
 class TestWeather(unittest.TestCase):
-    """天氣：Open-Meteo 查詢＋隨問隨答＋每日簡報排程。"""
+    """天氣：天文台官方 RSS（報告＋九日預報）＋隨問隨答＋每日簡報排程。"""
 
-    PAYLOAD = {
-        "current": {"time": "2026-09-24T11:00", "temperature_2m": 30.1,
-                    "apparent_temperature": 34.0, "relative_humidity_2m": 80,
-                    "weather_code": 2, "wind_speed_10m": 12.0, "precipitation": 0},
-        "hourly": {"time": ["2026-09-24T11:00", "2026-09-24T12:00",
-                            "2026-09-24T13:00"],
-                   "precipitation_probability": [10, 60, 40]},
-        "daily": {"weather_code": [2, 95], "temperature_2m_max": [32, 31],
-                  "temperature_2m_min": [27, 26],
-                  "precipitation_probability_max": [60, 80],
-                  "uv_index_max": [9, 8], "precipitation_sum": [1, 5]}}
+    CUR = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>本港地區天氣報告</title>'
+        '<item><title>香港天文台於2026年10月06日01時02分發出之天氣報告</title>'
+        '<description><![CDATA[<p>上 午 1 時 天 文 台 錄 得：<br/>'
+        '氣 溫 ： 25 度<br/>相 對 濕 度 ： 百 分 之 65<br/>'
+        '<p></p>本 港 其 他 地 區 的 氣 溫 ：<br/>'
+        '<table><tr><td>將 軍 澳 </td><td>23 度 ，</td></tr>'
+        '<tr><td>觀 塘 </td><td>24 度 ，</td></tr></table><br/>'
+        '展 望 ： 大 致 天 晴 及 乾 燥 。<br/>]]>'
+        '</description></item></channel></rss>')
+
+    FND = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<rss version="2.0"><channel><title>九天天氣預報</title>'
+        '<item><title>香港天文台於2026年10月06日00時50分發出之天氣報告</title>'
+        '<description><![CDATA[ 天 氣 概 況 ：<br/>'
+        '乾 燥 的 東 北 季 候 風 會 在 未 來 一 兩 日 帶 來 大 致 良 好 天 氣 。 <p/><p/>'
+        '十 月 六 日 ( 星 期 二 ) <br/>風：北 至 東 北 風 4 級 。 <br/>'
+        '天 氣 ： 大 致 多 雲 及 乾 燥 。 <br/>氣 溫： 23 至 29 度 。<br/>'
+        '相 對 濕 度 ：百 分 之 45 至 75 。<br/><p/><p/>'
+        '十 月 七 日 ( 星 期 三 ) <br/>風：東 北 風 4 級 。 <br/>'
+        '天 氣 ： 多 雲 ， 稍 後 有 驟 雨 。 <br/>氣 溫： 24 至 30 度 。<br/>'
+        '相 對 濕 度 ：百 分 之 60 至 90 。<br/>]]>'
+        '</description></item></channel></rss>')
 
     def setUp(self):
         import urllib.request
@@ -3055,23 +3069,57 @@ class TestWeather(unittest.TestCase):
     def test_report_formats_and_umbrella(self):
         import urllib.request
 
-        class R:
-            def read(self_):
-                return json.dumps(self.PAYLOAD).encode()
+        def fake_urlopen(req, timeout=30):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
 
-            def __enter__(self_):
-                return self_
+            class R:
+                def read(self_):
+                    return (self.FND if "SeveralDays" in url
+                            else self.CUR).encode()
 
-            def __exit__(self_, *a):
-                return False
-        urllib.request.urlopen = lambda url, timeout=30: R()
+                def __enter__(self_):
+                    return self_
+
+                def __exit__(self_, *a):
+                    return False
+            return R()
+        urllib.request.urlopen = fake_urlopen
+        ok, txt = bot._weather_report()
+        self.assertTrue(ok, txt)
+        self.assertIn("天文台 01:02 報：25°C", txt)
+        self.assertIn("濕度 65%", txt)
+        self.assertIn("將軍澳 23°C", txt)
+        self.assertIn("展望", txt)
+        self.assertIn("天氣概況", txt)
+        self.assertIn("今日（10月6日 週二）", txt)
+        self.assertIn("今日（10月6日 週二）：大致多雲及乾燥，23–29°C", txt)
+        self.assertIn("聽日（10月7日 週三）", txt)
+        self.assertIn("24–30°C", txt)
+        self.assertIn("帶遮", txt)          # 聽日驟雨 → 提醒
+
+    def test_report_current_dead_fnd_alive(self):
+        import urllib.request
+
+        def fake_urlopen(req, timeout=30):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            if "CurrentWeather" in url:
+                raise OSError("current死")
+
+            class R:
+                def read(self_):
+                    return self.FND.encode()
+
+                def __enter__(self_):
+                    return self_
+
+                def __exit__(self_, *a):
+                    return False
+            return R()
+        urllib.request.urlopen = fake_urlopen
         ok, txt = bot._weather_report()
         self.assertTrue(ok)
-        self.assertIn("30.1°C", txt)
-        self.assertIn("間中多雲", txt)
-        self.assertIn("聽日", txt)
-        self.assertIn("雷雨", txt)
-        self.assertIn("帶遮", txt)          # 未來幾鐘 60% → 提醒
+        self.assertIn("今日（10月6日 週二）", txt)
+        self.assertIn("而家讀數攞唔到", txt)
 
     def test_report_network_error(self):
         import urllib.request
