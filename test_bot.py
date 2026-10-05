@@ -1793,6 +1793,24 @@ class TestWaMove(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(sub, "IMG-a-1.jpg")))
         self.assertTrue(os.path.exists(os.path.join(sub, "IMG-b.jpg")))
 
+    def test_move_precreates_post_folders(self):
+        """搬相真搬自動開定崗位資料夾套裝；預覽就乜都唔開（2026-10-06）。"""
+        mid = dt.datetime(2026, 9, 23, 1, 30)
+        self._mk(self.tmp, "IMG-c.jpg", mid)
+        r = bot._wa_move(self.now, src_root=self.tmp, dest=self.dest)
+        self.assertIn("搬咗 1/1 張", r)
+        self.assertIn("崗位資料夾開定", r)
+        shift_c = os.path.join(self.dest, "2026 09月", "2026-09-22",
+                               "Shift_C")
+        for p in bot._PATROL_POSTS:
+            self.assertTrue(os.path.isdir(os.path.join(shift_c, p)), p)
+        # 預覽：唔開任何資料夾
+        d2 = tempfile.mkdtemp()
+        self._mk(self.tmp, "IMG-d.jpg", mid)
+        bot._wa_move(self.now, preview=True, src_root=self.tmp, dest=d2)
+        self.assertFalse(os.path.exists(
+            os.path.join(d2, "2026 09月", "2026-09-22", "Shift_C")))
+
     def test_move_nothing_to_do(self):
         r = bot._wa_move(self.now, src_root=self.tmp, dest=self.dest)
         self.assertIn("冇相", r)

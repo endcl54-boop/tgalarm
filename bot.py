@@ -3767,6 +3767,11 @@ def _gemini_classify(img_path: str, posts: list | None = None) -> tuple:
     return None, err
 
 
+# 崗位資料夾套裝：搬相真搬時自動開定，用戶 USB 拖入即分好（2026-10-06 用戶令）
+_PATROL_POSTS = ("Ch", "Platform", "T74", "T76",
+                 "T78", "T80", "T82", "T84")
+
+
 def _wa_move(now: dt.datetime, preview: bool = False,
              src_root: str | None = None, dest: str | None = None,
              window: tuple | None = None) -> str:
@@ -3835,7 +3840,14 @@ def _wa_move(now: dt.datetime, preview: bool = False,
             touched.add(d)
         except OSError as e:
             log.warning("搬相失敗 %s：%s", path, e)
+    for p in _PATROL_POSTS:
+        try:
+            os.makedirs(os.path.join(base, p), exist_ok=True)
+        except OSError as e:
+            log.warning("開崗位資料夾失敗 %s：%s", p, e)
     lines.append(f"✅ 搬咗 {moved}/{len(hits)} 張 → {base}")
+    lines.append("📂 崗位資料夾開定：" + "、".join(_PATROL_POSTS)
+                 + "——USB 過 PC 直接拖入去")
     lines.append("（USB 過電腦：成個 BG巡邏相片記錄 資料夾抄過去直接合併同名樹）")
     ms = shutil.which("termux-media-scan")
     for d in touched:
