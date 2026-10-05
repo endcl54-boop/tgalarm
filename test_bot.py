@@ -2184,6 +2184,145 @@ class TestSchedPauseDate(unittest.TestCase):
             {"type": "sched_resume", "ids": []}), "排定繼續排程：全部")
 
 
+class TestVolPlay(unittest.TestCase):
+    """音量x% 播 [歌單]／hhmm 音量x% 播 [歌單]（用戶令 2026-10-05）。"""
+
+    def test_parse_vol(self):
+        c = bot.parse_player("音量40% 播 lofi")
+        self.assertEqual((c.action, c.vol, c.ref), ("play", 40, "lofi"))
+        c2 = bot.parse_player("0700 音量40% 播 lofi")
+        self.assertEqual((c2.action, c2.hour, c2.minute, c2.vol, c2.ref),
+                         ("sched_once", 7, 0, 40, "lofi"))
+        c3 = bot.parse_player("每日 0700 音量40% 播 lofi")
+        self.assertEqual((c3.action, c3.vol), ("sched_daily", 40))
+        c4 = bot.parse_player("音量40% 隨機播 lofi")
+        self.assertEqual((c4.action, c4.vol, c4.shuffle), ("play", 40, True))
+        # 寬鬆：音量放喺時間前都收
+        c5 = bot.parse_player("音量40% 0700 播 lofi")
+        self.assertEqual((c5.action, c5.vol), ("sched_once", 40))
+        # 超界即拒
+        self.assertEqual(bot.parse_player("音量150% 播 lofi").action, "vol_bad")
+        self.assertEqual(bot.parse_player("音量0% 播 lofi").vol, 0)
+        # 舊格式零影響
+        for t in ("播 lofi", "0700 播 lofi", "每日 0700 播 lofi",
+                  "隨機播 lofi", "play lofi"):
+            self.assertIsNone(bot.parse_player(t).vol, t)
+
+    def test_set_media_volume(self):
+        rec = []
+
+        def fake_shell(cmd):
+            rec.append(cmd)
+            if "get-max-volume" in cmd:
+                return True, "AudioManager.getStreamMaxVolume(3) -> 150"
+            if "set-volume" in cmd:
+                return True, f"calling AudioManager{cmd[10:]}"
+            if "get-stream-volume" in cmd:
+                target = rec[-2].split()[-1]      # 對上一個 set 嘅值
+                return True, f"AudioManager.getStreamVolume(3) -> {target}"
+            return False, "?"
+
+        old = bot._shell_priv_exec
+        try:
+            bot._shell_priv_exec = fake_shell
+            ok, det = bot._set_media_volume(50)
+            self.assertTrue(ok)
+            self.assertIn("75/150", det)
+            self.assertIn("cmd audio set-volume 3 75", rec)
+            # 讀返唔對 → 失敗自證
+            def bad_shell(cmd):
+                if "get-max-volume" in cmd:
+                    return True, "-> 150"
+                if "set-volume" in cmd:
+                    return True, "ok"
+                return True, "AudioManager.getStreamVolume(3) -> 120"
+            bot._shell_priv_exec = bad_shell
+            ok2, det2 = bot._set_media_volume(50)
+            self.assertFalse(ok2)
+            self.assertIn("75", det2) and self.assertIn("120", det2)
+            # 攞唔到 max → 失敗
+            bot._shell_priv_exec = lambda c: (False, "lane死")
+            ok3, _ = bot._set_media_volume(50)
+            self.assertFalse(ok3)
+        finally:
+            bot._shell_priv_exec = old
+
+    def test_add_job_persists_vol(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot = bot.JOBS_PATH, dict(bot._TASKS)
+        self._oarm = bot._arm
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        try:
+            now = bot.dt.datetime.now()
+            cmd = bot.PlayerCmd("sched_once", ref="lofi", hour=7, minute=0,
+                                vol=40)
+            job, _rep = bot._add_job(cmd, 1, now, url="u")
+            self.assertEqual(job["vol"], 40)
+            cmd0 = bot.PlayerCmd("sched_once", ref="lofi", hour=8, minute=0)
+            job0, _ = bot._add_job(cmd0, 1, now, url="u")
+            self.assertIsNone(job0["vol"])
+            # 列表顯示
+            self.assertIn("🔊40%", bot._fmt_job_content(job))
+            self.assertNotIn("🔊", bot._fmt_job_content(job0))
+        finally:
+            bot.JOBS_PATH, bot._TASKS, bot._arm = self._oj, self._ot, self._oarm
+
+    def test_fire_sets_volume_before_play(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot = bot.JOBS_PATH, dict(bot._TASKS)
+        self._oarm, self._ori = bot._arm, bot.run_intent
+        self._osay, self._oss, self._oplay = bot._say, bot._send_safe, bot._play
+        self._osv = bot._set_media_volume
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        bot.run_intent = lambda cmd, t=0: (True, "OK")
+        order = []
+
+        async def fs(cid, msg, tag=""):
+            return None
+        bot._send_safe = fs
+
+        async def say(text, delay=0):
+            order.append("say")
+        bot._say = say
+        bot._play = lambda u, sh=False: order.append("play") or (True, "OK")
+
+        def sv(pct):                     # 生產 code 係 sync（to_thread 包）
+            order.append(f"vol{pct}")
+            return True, "音量 40%（60/150）"
+        bot._set_media_volume = sv
+        try:
+            now = bot.dt.datetime.now()
+            job = {"id": 1, "type": "play", "url": "u", "label": "lofi",
+                   "hh": now.hour, "mm": now.minute, "daily": False,
+                   "vol": 40, "shuffle": False,
+                   "next": now.isoformat(), "chat_id": 1, "paused": False}
+            bot._save_json(bot.JOBS_PATH, [job])
+            loop = asyncio.new_event_loop()   # 屋企式：唔好 asyncio.run（會清 current loop 毒下游）
+            try:
+                loop.run_until_complete(bot._fire_later(dict(job), 0))
+            finally:
+                loop.close()
+            self.assertEqual(order, ["vol40", "play"])
+            # 無 vol：唔好掂音量
+            order.clear()
+            job2 = dict(job, id=2, vol=None)
+            bot._save_json(bot.JOBS_PATH, [job2])
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(bot._fire_later(dict(job2), 0))
+            finally:
+                loop.close()
+            self.assertEqual(order, ["play"])
+        finally:
+            bot.JOBS_PATH = self._oj
+            bot._TASKS = self._ot
+            bot._arm, bot.run_intent = self._oarm, self._ori
+            bot._say, bot._send_safe, bot._play = self._osay, self._oss, self._oplay
+            bot._set_media_volume = self._osv
+
+
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
 

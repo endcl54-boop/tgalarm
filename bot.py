@@ -17,6 +17,7 @@ tgalarm — Telegram 鬧鐘・計時器機械人（Android Termux 直連系統�
 播放 YouTube 歌單（可自定義命名）：
     播 [名/連結]           停
     2130 播 [名]          每日 0700 播 [名]
+    音量40% 播 [名]       0700 音量40% 播 [名]
     歌單 名 連結（儲存）    歌單 / 播程 / 取消播 編號
     timer 25m             alarm 07:00
 
@@ -159,6 +160,7 @@ HELP = (
     "　（之後每行淨係打時間都得，會繼承上面嘅計時/鬧鐘）\n"
     "🎵 播 YouTube 歌單：\n"
     "・播 [名/連結]　・隨機播 [名]　・停　・2130 播 [名]\n"
+    "・音量40% 播 [名]／0700 音量40% 播 [名]＝開播前校好媒體音量（最大聲嘅 %）\n"
     "・每日 0700 播 [名] 隨機　・每日 0900 計時 25分鐘（計時排程）\n"
     "・歌單 名 連結（儲存）　・歌單/排程（列表）\n"
     "・管理：取消 N・暫停 N・繼續 N・暫停排程＝全部停・繼續排程＝全部恢復・改 N 1830\n"
@@ -521,6 +523,7 @@ class PlayerCmd:
     minute: int | None = None
     job_id: int | None = None
     shuffle: bool = False
+    vol: int | None = None      # 音量x%：開播前設媒體音量（最大聲嘅百分比）
     seconds: int | None = None  # sched_timer 用
     hour2: int | None = None    # sched_alloc：結束時間
     minute2: int | None = None
@@ -551,6 +554,13 @@ def parse_player(text: str) -> PlayerCmd | None:
     """解析歌單/排程相關指令；唔係嘅話回傳 None（交返畀計時/鬧鐘解析）。
     唔做 lower()——YouTube URL 大小寫敏感；英文關鍵字改用 IGNORECASE。"""
     s = re.sub(r"\s+", " ", text.strip())
+    vol = None
+    vm = re.search(r"音量\s*(\d{1,3})\s*%", s)
+    if vm:
+        if int(vm.group(1)) > 100:
+            return PlayerCmd("vol_bad")
+        vol = int(vm.group(1))
+        s = re.sub(r"\s+", " ", (s[:vm.start()] + " " + s[vm.end():]).strip())
     if re.fullmatch(r"/?(?:完成|完成咗|早完成|提早完成|下一階段|下階段|跳過|skip|next)\s*[！!]?", s, re.IGNORECASE):
         return PlayerCmd("alloc_done")
     m = re.fullmatch(r"/?搬(?:whatsapp|wa)?相\s*(.*)", s, re.IGNORECASE)
@@ -783,7 +793,7 @@ def parse_player(text: str) -> PlayerCmd | None:
             if pm:
                 ref, sh = _strip_shuffle(pm.group(2))
                 return PlayerCmd("sched_daily", ref=ref, hour=hh, minute=mm,
-                                 shuffle="隨機" in pm.group(1) or sh)
+                                 shuffle="隨機" in pm.group(1) or sh, vol=vol)
         return None
     # hhmm <計時 時長 | [隨機]播> …（一次）
     r0 = _read_hhmm(s)
@@ -806,7 +816,7 @@ def parse_player(text: str) -> PlayerCmd | None:
         if pm:
             ref, sh = _strip_shuffle(pm.group(2))
             return PlayerCmd("sched_once", ref=ref, hour=hh, minute=mm,
-                             shuffle="隨機" in pm.group(1) or sh)
+                             shuffle="隨機" in pm.group(1) or sh, vol=vol)
         return None  # 淨時間行：留返畀批次繼承用
     m = re.fullmatch(r"(?:開導航|導航|nav|去)\s*(.*)", s, re.IGNORECASE)
     if m:
@@ -817,7 +827,8 @@ def parse_player(text: str) -> PlayerCmd | None:
     m = re.match(r"^/?(隨機播放|隨機播|播放|播|play)\s*(.*)$", s, re.IGNORECASE)
     if m:
         ref, sh = _strip_shuffle(m.group(2))
-        return PlayerCmd("play", ref=ref, shuffle="隨機" in m.group(1) or sh)
+        return PlayerCmd("play", ref=ref, shuffle="隨機" in m.group(1) or sh,
+                         vol=vol)
     return None
 
 
@@ -2305,6 +2316,30 @@ def _autoplay_url(url: str, shuffle: bool = False) -> tuple:
     return url, ("watch?v=" in url or "youtu.be/" in url)
 
 
+def _media_vol_max() -> int | None:
+    """部機 STREAM_MUSIC（3）最大格數；vivo 實測 150（唔係一般 15）。"""
+    ok, out = _shell_priv_exec("cmd audio get-max-volume 3")
+    m = re.search(r"->\s*(\d+)", out or "")
+    return int(m.group(1)) if ok and m else None
+
+
+def _set_media_volume(pct: int) -> tuple:
+    """開播前設媒體音量。pct=最大聲嘅百分比（0–100，用戶 2026-10-05 揀定）。
+    通道：cmd audio set-volume（自證：設完讀返核對）。回 (成功, 詳情)；
+    失敗唔攔播放（響鬧大過天）。"""
+    mx = _media_vol_max()
+    if not mx:
+        return False, "攞唔到最大音量（特權通道死咗？）"
+    idx = max(0, min(mx, round(mx * pct / 100)))
+    ok1, _o = _shell_priv_exec(f"cmd audio set-volume 3 {idx}")
+    ok2, out2 = _shell_priv_exec("cmd audio get-stream-volume 3")
+    m = re.search(r"->\s*(\d+)", out2 or "")
+    cur = int(m.group(1)) if ok2 and m else None
+    if ok1 and cur == idx:
+        return True, f"音量 {pct}%（{idx}/{mx}）"
+    return False, f"音量設唔到（目標 {idx}，讀返 {cur}）"
+
+
 def _play(url: str, shuffle: bool = False) -> tuple:
     """優先直開 YouTube app（穩陣快），失敗先交畀系統揀 app。
     回傳 (成功與否, 訊息)；成功但只開到歌單頁（唔自動播）時訊息 = "NO_AUTOLIST"。"""
@@ -2460,7 +2495,8 @@ def _fmt_job_content(j: dict) -> str:
         if len(names) > 24:
             names = names[:21] + "…"
         return f"分配 {names}（{len(segs)}項）"
-    return f"播「{j['label']}」" + ("🔀" if j.get("shuffle") else "")
+    return (f"播「{j['label']}」" + ("🔀" if j.get("shuffle") else "")
+            + (f" 🔊{j['vol']}%" if j.get("vol") is not None else ""))
 
 
 def _fmt_jobs(now: dt.datetime) -> str:
@@ -2921,6 +2957,8 @@ async def _fire_later(job: dict, delay: float) -> None:
         how = f"開網頁「{job.get('label')}」{wurl}"
         await _say(f"開網頁{_speech_scrub(job.get('label') or '')}")
     else:
+        if job.get("vol") is not None:
+            await asyncio.to_thread(_set_media_volume, job["vol"])
         ok, info = _play(job["url"], job.get("shuffle", False))
         how = ("隨機開始播放" if job.get("shuffle") else "開始播放") + f"「{job['label']}」"
     if ok and info == "NO_AUTOLIST":
@@ -3233,7 +3271,7 @@ def _add_job(cmd: PlayerCmd, chat_id: int, now: dt.datetime,
            "url": url, "seconds": seconds, "mode": mode,
            "label": label or cmd.ref or default_label,
            "chat_id": chat_id, "next": first.isoformat(),
-           "shuffle": cmd.shuffle, "paused": False}
+           "shuffle": cmd.shuffle, "vol": cmd.vol, "paused": False}
     if is_series:
         job["end_hh"] = cmd.hour2
         job["end_mm"] = cmd.minute2
@@ -3757,17 +3795,24 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         return _wa_move(now, preview=(cmd.ref == "preview"), window=win)
     if a == "alloc_done":
         return _alloc_advance(chat_id, now)
+    if a == "vol_bad":
+        return "❓ 音量要 0–100。例：音量40% 播 lofi／0700 音量40% 播 lofi"
     if a == "play":
         url, info = _resolve_playlist(cmd.ref)
         if url is None:
             return "❓ " + info
+        vol_note = ""
+        if cmd.vol is not None:
+            okv, det = _set_media_volume(cmd.vol)
+            vol_note = ("\n🔊 " if okv else "\n⚠️ ") + det
         ok, out = _play(url, cmd.shuffle)
         if ok:
             tag = f"「{info}」" if info else ""
             if out == "NO_AUTOLIST":
-                return f"🔶 開咗歌單頁{tag}，但攞唔到首條片做自動播放，喺 app 撳 ▶ 開始"
+                return (f"🔶 開咗歌單頁{tag}，但攞唔到首條片做自動播放，"
+                        f"喺 app 撳 ▶ 開始{vol_note}")
             how = "🔀 隨機開始播放" if cmd.shuffle else "▶️ 開始播放"
-            return f"{how}{tag}" + ("（DRY_RUN）" if DRY_RUN else "")
+            return f"{how}{tag}" + ("（DRY_RUN）" if DRY_RUN else "") + vol_note
         return "❌ 開唔到 YouTube（有冇裝 YouTube app？）：" + out[:150]
     if a == "stop":
         ok, how = _stop()
@@ -3785,7 +3830,8 @@ def _execute_player(cmd: PlayerCmd, chat_id: int, now: dt.datetime) -> str:
         kind = "每日" if a == "sched_daily" else "一次"
         when = f"{day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
         shuf = " 🔀隨機" if cmd.shuffle else ""
-        msg = f"🗓 已排程（{kind}{shuf} #{job['id']}）：{when} 播「{job['label']}」"
+        voln = f" 🔊{cmd.vol}%" if cmd.vol is not None else ""
+        msg = f"🗓 已排程（{kind}{shuf}{voln} #{job['id']}）：{when} 播「{job['label']}」"
         return msg + _replaced_note(replaced)
     if a in ("series", "series_daily"):
         job, replaced = _add_job(cmd, chat_id, now, seconds=cmd.seconds)
