@@ -556,7 +556,8 @@ def parse_player(text: str) -> PlayerCmd | None:
     s = re.sub(r"\s+", " ", text.strip())
     vol = None
     vm = re.search(r"音量\s*(\d{1,3})\s*%", s)
-    if vm:
+    # 改播/編輯指令：音量留喺內容入面交 _edit_job 處理（佢先知係咪播歌任務）
+    if vm and not re.match(r"/?(?:改播|編輯|改)\s*#?\d+", s):
         if int(vm.group(1)) > 100:
             return PlayerCmd("vol_bad")
         vol = int(vm.group(1))
@@ -3339,6 +3340,16 @@ def _edit_job(jid: int, body: str, now: dt.datetime) -> tuple:
     if not job:
         return False, f"搵唔到 #{jid}。send「排程」睇編號"
     rest, changes = body.strip(), []
+    vm = re.search(r"音量\s*(\d{1,3})\s*%", rest)   # 改 N 音量50%（2026-10-06）
+    if vm:
+        if int(vm.group(1)) > 100:
+            return False, "音量要 0–100。例：改 N 音量50%"
+        if job.get("type", "play") != "play":
+            return False, "呢類任務冇音量（淨播歌任務有）"
+        job["vol"] = int(vm.group(1))
+        changes.append(f"音量→{job['vol']}%")
+        rest = re.sub(r"\s+", " ",
+                      (rest[:vm.start()] + " " + rest[vm.end():]).strip())
     r = _read_hhmm(rest)
     if r:
         hh, mm, rest = r
@@ -3380,7 +3391,8 @@ def _edit_job(jid: int, body: str, now: dt.datetime) -> tuple:
             job["shuffle"] = sh
             changes.append(f"內容→播「{info or job['label']}」" + ("🔀" if sh else ""))
     if not changes:
-        return False, "支援：改 N hhmm｜改 N 每日｜改 N 一次｜改 N 歌單名 [隨機]｜改 N 時長｜改 N 地點名"
+        return False, ("支援：改 N hhmm｜改 N 每日｜改 N 一次｜改 N 歌單名 [隨機]"
+                       "｜改 N 時長｜改 N 地點名｜改 N 音量50%（播歌任務）")
     job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
     _save_json(JOBS_PATH, jobs)
     t = _TASKS.pop(jid, None)

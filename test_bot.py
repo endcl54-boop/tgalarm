@@ -2322,6 +2322,50 @@ class TestVolPlay(unittest.TestCase):
             bot._say, bot._send_safe, bot._play = self._osay, self._oss, self._oplay
             bot._set_media_volume = self._osv
 
+    def test_edit_vol(self):
+        """改播 N 音量50%：就地改已排程播歌任務嘅音量（用戶令 2026-10-06）。"""
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot, self._oarm = bot.JOBS_PATH, dict(bot._TASKS), bot._arm
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        try:
+            now = bot.dt.datetime.now()
+            job = {"id": 5, "type": "play", "url": "u", "label": "lofi",
+                   "hh": 7, "mm": 0, "daily": True, "vol": None,
+                   "shuffle": False, "next": now.isoformat(), "chat_id": 1,
+                   "paused": False}
+            bot._save_json(bot.JOBS_PATH, [job])
+            # parse 本來就通（改播家族）
+            c = bot.parse_player("改播 5 音量50%")
+            self.assertEqual((c.action, c.job_id, c.ref),
+                             ("edit", 5, "音量50%"))
+            # 淨改音量：其他欄不動
+            ok, info = bot._edit_job(5, "音量50%", now)
+            self.assertTrue(ok)
+            self.assertIn("音量→50%", info)
+            j = bot._jobs()[0]
+            self.assertEqual((j["vol"], j["hh"], j["daily"]), (50, 7, True))
+            self.assertIn("🔊50%", bot._fmt_job_content(j))
+            # 混合：時間＋音量一次改
+            ok2, info2 = bot._edit_job(5, "0800 音量30%", now)
+            self.assertTrue(ok2)
+            self.assertIn("時間→08:00", info2)
+            self.assertIn("音量→30%", info2)
+            j = bot._jobs()[0]
+            self.assertEqual((j["vol"], j["hh"], j["mm"]), (30, 8, 0))
+            # 拒：>100
+            ok3, info3 = bot._edit_job(5, "音量150%", now)
+            self.assertFalse(ok3)
+            self.assertIn("0–100", info3)
+            # 拒：非播歌任務冇音量
+            tjob = dict(job, id=6, type="timer", seconds=60, vol=None)
+            bot._save_json(bot.JOBS_PATH, [job, tjob])
+            ok4, info4 = bot._edit_job(6, "音量50%", now)
+            self.assertFalse(ok4)
+            self.assertIn("冇音量", info4)
+        finally:
+            bot.JOBS_PATH, bot._TASKS, bot._arm = self._oj, self._ot, self._oarm
+
 
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
