@@ -3028,7 +3028,9 @@ class TestWeather(unittest.TestCase):
         '氣 溫 ： 25 度<br/>相 對 濕 度 ： 百 分 之 65<br/>'
         '<p></p>本 港 其 他 地 區 的 氣 溫 ：<br/>'
         '<table><tr><td>將 軍 澳 </td><td>23 度 ，</td></tr>'
-        '<tr><td>觀 塘 </td><td>24 度 ，</td></tr></table><br/>'
+        '<tr><td>觀 塘 </td><td>24 度 ，</td></tr>'
+        '<tr><td>京 士 柏 </td><td>24 度 ，</td></tr>'
+        '<tr><td>跑 馬 地 </td><td>25 度 ，</td></tr></table><br/>'
         '展 望 ： 大 致 天 晴 及 乾 燥 。<br/>]]>'
         '</description></item></channel></rss>')
 
@@ -3050,6 +3052,7 @@ class TestWeather(unittest.TestCase):
         import urllib.request
         self._urlopen = urllib.request.urlopen
         self._report = bot._weather_report
+        self._gps = bot._gps_fix
         self._owner = bot._ensure_owner
         self._send = bot._send_safe
         self._jobs = bot._jobs
@@ -3060,6 +3063,7 @@ class TestWeather(unittest.TestCase):
         import urllib.request
         urllib.request.urlopen = self._urlopen
         bot._weather_report = self._report
+        bot._gps_fix = self._gps
         bot._ensure_owner = self._owner
         bot._send_safe = self._send
         bot._jobs = self._jobs
@@ -3083,12 +3087,13 @@ class TestWeather(unittest.TestCase):
                 def __exit__(self_, *a):
                     return False
             return R()
+        bot._gps_fix = lambda: None          # GPS 唔得 → 屋企佐敦
         urllib.request.urlopen = fake_urlopen
         ok, txt = bot._weather_report()
         self.assertTrue(ok, txt)
         self.assertIn("天文台 01:02 報：25°C", txt)
         self.assertIn("濕度 65%", txt)
-        self.assertIn("將軍澳 23°C", txt)
+        self.assertIn("🏠 佐敦附近（京士柏）24°C", txt)
         self.assertIn("展望", txt)
         self.assertIn("天氣概況", txt)
         self.assertIn("今日（10月6日 週二）", txt)
@@ -3096,6 +3101,35 @@ class TestWeather(unittest.TestCase):
         self.assertIn("聽日（10月7日 週三）", txt)
         self.assertIn("24–30°C", txt)
         self.assertIn("帶遮", txt)          # 聽日驟雨 → 提醒
+
+    def test_gps_district_line(self):
+        import urllib.request
+
+        def fake_urlopen(req, timeout=30):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+
+            class R:
+                def read(self_):
+                    return (self.FND if "SeveralDays" in url
+                            else self.CUR).encode()
+
+                def __enter__(self_):
+                    return self_
+
+                def __exit__(self_, *a):
+                    return False
+            return R()
+        urllib.request.urlopen = fake_urlopen
+        self.assertEqual(bot._nearest_station(22.2665, 114.1850), "跑馬地")
+        self.assertEqual(bot._nearest_station(22.4480, 114.1650), "大埔")
+        bot._gps_fix = lambda: (22.2665, 114.1850)
+        ok, txt = bot._weather_report()
+        self.assertTrue(ok, txt)
+        self.assertIn("📍 你嗰邊（跑馬地）25°C", txt)
+        bot._gps_fix = lambda: (22.3820, 114.2700)   # 西貢唔喺樣本表
+        ok2, txt2 = bot._weather_report()
+        self.assertTrue(ok2)
+        self.assertIn("🏠 佐敦附近（京士柏）24°C", txt2)
 
     def test_report_current_dead_fnd_alive(self):
         import urllib.request

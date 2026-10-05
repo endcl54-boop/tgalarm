@@ -182,7 +182,7 @@ HELP = (
     "\n💱 匯率 100美金（淨「匯率」＝主要貨幣表）　🌍 時間 東京"
     "\n🎲 骰仔（骰仔 20）　🎯 揀 飲茶/壽司/拉麵　🔐 密碼 16　💪 打氣"
     "🎲 大話骰：「大話」開枱，3個4 叫牌，「開！」攤牌；起手 3個起／齋2個起／叫1即齋；計分制「3個4齋」齋叫「劈」雙倍"
-    "\n🌤 天氣：「天氣」即時查；「排程」可加每日天氣簡報"
+    "\n🌤 天氣：「天氣」即時查（自動帶你嗰邊／屋企佐敦讀數）；「排程」可加每日天氣簡報"
     "\n💰 可花：「可花」查今日可花（出糧夠唔夠）"
 )
 
@@ -1751,8 +1751,83 @@ def _hko_section(flat: str, keys, stop_pat: str) -> list:
     return out
 
 
+# 天文台各區監測站約數座標（揀最近站用，唔做導航級用途）
+_HKO_STATIONS = {
+    "天文台": (22.302, 114.172), "京士柏": (22.318, 114.179),
+    "深水埗": (22.336, 114.155), "九龍城": (22.329, 114.188),
+    "黃大仙": (22.336, 114.196), "觀塘": (22.310, 114.226),
+    "啟德跑道公園": (22.304, 114.211), "將軍澳": (22.318, 114.264),
+    "西貢": (22.382, 114.270), "沙田": (22.377, 114.188),
+    "大埔": (22.448, 114.165), "大美督": (22.470, 114.221),
+    "打鼓嶺": (22.527, 114.147), "流浮山": (22.468, 113.996),
+    "元朗公園": (22.445, 114.022), "石崗": (22.433, 114.078),
+    "荃灣可觀": (22.374, 114.113), "荃灣城門谷": (22.369, 114.148),
+    "屯門": (22.410, 113.977), "青衣": (22.359, 114.106),
+    "長洲": (22.203, 114.027), "赤鱲角": (22.301, 113.915),
+    "香港公園": (22.277, 114.160), "跑馬地": (22.266, 114.185),
+    "筲箕灣": (22.279, 114.229), "赤柱": (22.220, 114.213),
+    "黃竹坑": (22.245, 114.160)}
+_HOME = "佐敦"                     # 屋企（用戶 2026-10-06：我屋企係佐敦）
+_HOME_NEAR = ("京士柏", "天文台", "深水埗", "九龍城")
+_GPS_CACHE = [0.0, None]           # [時間戳, (lat, lng)｜None]
+
+
+def _gps_fix():
+    """而家位置：termux-location → dumpsys last fix。都唔得回 None
+    （cache 10 分鐘，避免次次 query 等十幾秒）。"""
+    import time
+    if time.time() - _GPS_CACHE[0] < 600:
+        return _GPS_CACHE[1]
+    import subprocess
+    loc = None
+    try:
+        p = subprocess.run(
+            ["termux-location", "-p", "network", "-r", "once"],
+            capture_output=True, text=True, timeout=14)
+        d = json.loads(p.stdout or "{}")
+        if d.get("latitude") is not None:
+            loc = (float(d["latitude"]), float(d["longitude"]))
+    except Exception:
+        pass
+    if loc is None:
+        ok, out = _shell_priv_exec("dumpsys location")
+        mm = re.search(r"last location=Location\[[a-z]+\s+([\-0-9.]+),([\-0-9.]+)",
+                       out or "")
+        if ok and mm:
+            loc = (float(mm.group(1)), float(mm.group(2)))
+    _GPS_CACHE[0], _GPS_CACHE[1] = time.time(), loc
+    return loc
+
+
+def _nearest_station(lat: float, lng: float) -> str:
+    best, bd = "天文台", 9e9
+    for n, (a, b) in _HKO_STATIONS.items():
+        d = (lat - a) ** 2 + (lng - b) ** 2
+        if d < bd:
+            best, bd = n, d
+    return best
+
+
+def _hko_district_line(seg: str) -> str | None:
+    """地區行：GPS 得→你嗰邊（最近站）；唔得→屋企（佐敦附近）。"""
+    try:
+        loc = _gps_fix()
+    except Exception:
+        loc = None
+    if loc:
+        st = _nearest_station(*loc)
+        m = re.search(re.escape(st) + r"(\d{1,2})度", seg)
+        if m:
+            return f"📍 你嗰邊（{st}）{int(m.group(1))}°C"
+    for st in _HOME_NEAR:
+        m = re.search(re.escape(st) + r"(\d{1,2})度", seg)
+        if m:
+            return f"🏠 {_HOME}附近（{st}）{int(m.group(1))}°C"
+    return None
+
+
 def _hko_current() -> list:
-    """本港地區天氣報告 → 行陣（而家／將軍澳／概況展望）。"""
+    """本港地區天氣報告 → 行陣（而家／地區行／概況展望）。"""
     title, flat = _hko_flat(_HKO_CURRENT_URL)
     tm = re.search(r"於(\d{4})年(\d{1,2})月(\d{1,2})日(\d{1,2})時(\d{1,2})分", title)
     when = f"{int(tm.group(4)):02d}:{int(tm.group(5)):02d}" if tm else "??:??"
@@ -1764,9 +1839,9 @@ def _hko_current() -> list:
         lines.append(f"天文台 {when} 報：{int(temp.group(1))}°C"
                      + (f"、濕度 {int(hum.group(1))}%" if hum else ""))
     seg = flat.split("本港其他地區的氣溫", 1)[-1]
-    tko = re.search(r"將軍澳(\d{1,2})度", seg)
-    if tko:
-        lines.append(f"將軍澳 {int(tko.group(1))}°C")
+    dline = _hko_district_line(seg)
+    if dline:
+        lines.append(dline)
     lines += [f"{k}：{v}" for k, v in
               _hko_section(flat, _HKO_KEYS,
                            "天氣概況|本港地區天氣預測|展望|本港其他地區的氣溫")]
