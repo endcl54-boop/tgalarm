@@ -4194,6 +4194,63 @@ class TestWaitWall(unittest.TestCase):
         self.assertFalse(bot._jobs()[0]["alerted"])
         self.assertIn("收工", bot._battery_handle("電量守完", 1))
 
+    def test_bthead_guard(self):
+        """(54) 藍牙耳機電量守：parser＋即查＋開守／收工＋fire 骨。"""
+        sysui = ("      mConnectedDevices=[CachedBluetoothDevice{"
+                 "anonymizedAddress=XX:XX:XX:XX:C9:AD, name=看什麽看, "
+                 "groupId=-1, member=[]}]")
+        adapter = ("rec[0]: valString=+IPHONEACCEV=1,1,6, valObject=null, "
+                   "device=XX:XX:XX:XX:C9:AD\n"
+                   "rec[1]: valString=+IPHONEACCEV=1,1,9, valObject=null, "
+                   "device=XX:XX:XX:XX:C9:AD")
+        self.assertEqual(bot._parse_bt_connected(sysui),
+                         [("XX:XX:XX:XX:C9:AD", "看什麽看")])
+        self.assertEqual(bot._parse_bt_connected(""), [])
+        self.assertEqual(bot._parse_bt_battery(adapter),
+                         {"XX:XX:XX:XX:C9:AD": 90})   # 取最後一筆
+        self.assertEqual(bot._parse_bt_battery("garbage"), {})
+        old_hl = bot._headset_levels
+        try:
+            bot._headset_levels = lambda: (True, [("看什麽看", 90)])
+            self.assertIn("90%", bot._bthead_handle("耳機", 1))
+            self.assertIn("冇", bot._bthead_handle(
+                "耳機", 1)) if False else None
+            bot._headset_levels = lambda: (True, [])
+            self.assertIn("冇", bot._bthead_handle("耳機", 1))
+            bot._headset_levels = lambda: (False, "lane死")
+            self.assertIn("❌", bot._bthead_handle("耳機", 1))
+            # 開守：預設 60、指定 40、超界拒
+            self.assertIn("耳機守開工", bot._bthead_handle("耳機守", 1))
+            self.assertEqual(bot._jobs()[0]["thr"], 60)
+            self.assertIn("耳機守開工", bot._bthead_handle("耳機守 40", 1))
+            j40 = next(j for j in bot._jobs() if j.get("thr") == 40)
+            self.assertEqual(j40["type"], "bthead")
+            self.assertIn("5–95", bot._bthead_handle("耳機守 4", 1))
+            self.assertIn("🎧", bot._fmt_jobs(bot.dt.datetime.now()))
+            # fire：≤thr 報一次；>thr+5 重置；讀數 None 靜默
+            bot._headset_levels = lambda: (True, [("看什麽看", 35)])
+            asyncio.run(bot._fire_later(dict(j40), 0))
+            self.assertIn("35%", self.seen["msgs"][-1])
+            j40 = next(j for j in bot._jobs() if j.get("thr") == 40)
+            self.assertTrue(j40["alerted"])
+            n = len(self.seen["msgs"])
+            bot._headset_levels = lambda: (True, [("看什麽看", 35)])
+            asyncio.run(bot._fire_later(dict(j40), 0))
+            self.assertEqual(len(self.seen["msgs"]), n)   # 報一次過
+            bot._headset_levels = lambda: (True, [("看什麽看", 90)])
+            asyncio.run(bot._fire_later(dict(j40), 0))
+            j40 = next(j for j in bot._jobs() if j.get("thr") == 40)
+            self.assertFalse(j40["alerted"])
+            n = len(self.seen["msgs"])
+            bot._headset_levels = lambda: (True, [("看什麽看", None)])
+            asyncio.run(bot._fire_later(dict(j40), 0))
+            self.assertEqual(len(self.seen["msgs"]), n)   # 冇讀數靜默
+            self.assertIn("收工", bot._bthead_handle("耳機守完", 1))
+            self.assertEqual([j for j in bot._jobs()
+                              if j.get("type") == "bthead"], [])
+        finally:
+            bot._headset_levels = old_hl
+
     def test_jobs_list_icons(self):
         now = dt.datetime.now()
         bot._nag_handle("提醒 每30分 飲水", 1)

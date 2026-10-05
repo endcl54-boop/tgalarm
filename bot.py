@@ -149,6 +149,7 @@ HELP = (
     "・外賣模式：打「外賣」開——計時提早 5 分鐘響，hhmm 後面數字＝單號；「外賣結束」收工\n"
     "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
+    "🎧 耳機（即查藍牙耳機電量）・耳機守 60（≤60% 提你叉電）・耳機守完\n"
     "📅 倒數 考試 2027-05-04／倒數 聖誕 12-25（每年）／倒數（清單）　🎲 分組 3 阿明,阿強,阿寶\n"
     "⏰ 鬧鐘（直接落手機時鐘 app，系統自己響）：\n"
     "・鬧鐘 07:00 或 0700　・鬧鐘 1730 起身　・鬧鐘 每日0734 標籤＝日日\n"
@@ -1164,6 +1165,101 @@ def _focus_handle(t: str, chat_id: int):
 # ---- 電量守（每個鐘查一次，低過門檻警一次）----
 
 # ---- 電量守（每個鐘查一次，低過門檻警一次）----
+
+# ---- 藍牙耳機電量守（2026-10-05 用戶令：≤60% 提醒叉電）----
+# 數據源（真機實證 2026-10-05）：①SystemUI dump嘅 mConnectedDevices（邊隻連住）
+# ②AdapterService --print dump 嘅 HFP +IPHONEACCEV 紀錄（電量，最後一筆）
+_BT_SYSUI = "dumpsys activity service com.android.systemui"
+_BT_ADAPTER = ("dumpsys activity service "
+               "com.android.bluetooth/.btservice.AdapterService --print")
+
+
+def _parse_bt_connected(sysui_out: str) -> list:
+    """SystemUI dump → 連線中藍牙裝置 [(addr, name)]。"""
+    out = []
+    for m in re.finditer(r"mConnectedDevices=\[[^\]]*\]", sysui_out or ""):
+        for d in re.finditer(
+                r"anonymizedAddress=([0-9A-Fa-f:Xx]{8,}), name=([^,}\]]+)",
+                m.group(0)):
+            out.append((d.group(1).strip(), d.group(2).strip()))
+    return out
+
+
+def _parse_bt_battery(adapter_out: str) -> dict:
+    """AdapterService dump → {addr: 電量%}（+IPHONEACCEV 最後一筆；key1=電量）。"""
+    levels = {}
+    for m in re.finditer(
+            r"valString=\+IPHONEACCEV=(\d+(?:,\d+)*),.*?device=([0-9A-Fa-f:Xx]{8,})",
+            adapter_out or ""):
+        toks = m.group(1).split(",")
+        addr = m.group(2).strip()
+        try:
+            n = int(toks[0])
+        except ValueError:
+            continue
+        vals = toks[1:]
+        for i in range(0, min(2 * n, len(vals) - 1), 2):
+            if vals[i] == "1":                     # key 1＝電量（0–9 → ×10%）
+                try:
+                    lv = int(vals[i + 1])
+                except ValueError:
+                    break
+                if 0 <= lv <= 9:
+                    levels[addr] = lv * 10
+                break
+    return levels
+
+
+def _headset_levels() -> list:
+    """真機讀數：連線中藍牙耳機 [(name, level 或 None)]。失敗 → (ok=False, err)。"""
+    ok1, sysui = _shell_priv_exec(_BT_SYSUI)
+    ok2, adapter = _shell_priv_exec(_BT_ADAPTER)
+    if not (ok1 or ok2):
+        return False, str(sysui or adapter)[:120]
+    conn = _parse_bt_connected(sysui if ok1 else "")
+    if not conn and ok2:
+        conn = [(a, n) for a, n in _parse_bt_connected(adapter or "")]  # 冇都有
+    lv = _parse_bt_battery(adapter if ok2 else "")
+    out = [(name, lv.get(addr)) for addr, name in conn]
+    return True, out
+
+
+def _bthead_line(name: str, level, thr: int) -> str:
+    if level is None:
+        return f"🎧 {name}：讀唔到電量（耳機未報數，連一陣再查）"
+    warn = "⚠️ ≤" + str(thr) + "% 記得叉電" if level <= thr else "夠電"
+    return f"🎧 {name}：{level}%（{warn}）"
+
+
+def _bthead_handle(t: str, chat_id: int):
+    """耳機電量守：耳機（即查）・耳機守 60・耳機守完。"""
+    if t == "耳機":
+        ok, data = _headset_levels()
+        if not ok:
+            return f"❌ 耳機電量攞唔到（特權通道死咗）：{data}"
+        if not data:
+            return "🎧 而家冇藍牙耳機連住。"
+        return "\n".join(_bthead_line(n, l, 60) for n, l in data)
+    if t in ("耳機守完", "耳機守結束"):
+        gs = [j for j in _jobs() if j.get("type") == "bthead"]
+        if not gs:
+            return "而家冇耳機守行緊。"
+        for j in gs:
+            _remove_job(j["id"])
+        return "🎧 耳機守收工。"
+    m = re.fullmatch(r"耳機守\s*(\d{1,3})?", t)
+    if not m:
+        return None
+    thr = int(m.group(1)) if m.group(1) else 60
+    if not 5 <= thr <= 95:
+        return "❓ 門檻要 5–95%。例：耳機守 60"
+    now = dt.datetime.now()
+    job = _add_simple_job(chat_id, {
+        "type": "bthead", "thr": thr, "alerted": False, "chat_id": chat_id,
+        "hh": now.hour, "mm": now.minute, "next": now.isoformat()})
+    return (f"🎧 耳機守開工（#{job['id']}）：每 10 分鐘查一次連住嘅耳機，"
+            f"≤{thr}% 就提你叉電（提一次，回充 +5% 先重置）。「耳機守完」收")
+
 
 def _battery_handle(t: str, chat_id: int):
     if t == "電量":
@@ -2350,6 +2446,8 @@ def _fmt_job_content(j: dict) -> str:
                 + (f"（{j['label']}）" if j.get("label") else ""))
     if j.get("type") == "battery":
         return f"電量守 ≤{j.get('thr', 20)}%"
+    if j.get("type") == "bthead":
+        return f"耳機守 ≤{j.get('thr', 60)}%"
     if j.get("type") in ("sched_pause", "sched_resume"):
         act = "暫停" if j["type"] == "sched_pause" else "繼續"
         ids = j.get("ids") or []
@@ -2377,7 +2475,7 @@ def _fmt_jobs(now: dt.datetime) -> str:
         kind = "每日" if j.get("daily") else "一次"
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
                 "bell": "⏰", "weather": "🌤", "web": "🌐", "nag": "💧",
-                "focus": "🎯", "battery": "🔋",
+                "focus": "🎯", "battery": "🔋", "bthead": "🎧",
                 "sched_pause": "⏸", "sched_resume": "▶️"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
@@ -2691,6 +2789,38 @@ async def _fire_later(job: dict, delay: float) -> None:
                 await _send_safe(job["chat_id"], msg, "專注模式")
                 await _say(_speech_scrub(how))
         jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+        _save_json(JOBS_PATH, jobs)
+        _TASKS.pop(job["id"], None)
+        _arm(job)
+        return
+    elif jtype == "bthead":
+        thr = int(job.get("thr", 60))
+        ok, data = await asyncio.to_thread(_headset_levels)
+        msg = None
+        if not ok:
+            msg = f"❌ 耳機守攞唔到讀數：{data[:80]}"
+            job["alerted"] = False
+        else:
+            for name, level in data:
+                if (level is not None and level <= thr
+                        and not job.get("alerted")):
+                    job["alerted"] = True
+                    msg = f"🎧 {name} 耳機得 {level}%（≤{thr}%）——記得叉電！"
+                    await _say(f"耳機得{level}厘，記得叉電")
+                    break
+            if all(level is None or level > thr + 5 for _n, level in data):
+                job["alerted"] = False
+        if msg:
+            await _send_safe(job["chat_id"], msg, "耳機守")
+        jobs = _jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["alerted"] = job.get("alerted", False)
+        nxt = now + dt.timedelta(minutes=10)
+        job["next"] = nxt.isoformat()
         for j in jobs:
             if j["id"] == job["id"]:
                 j["next"] = job["next"]
@@ -4255,7 +4385,7 @@ async def _on_message(update, context):
         await _say(said)
         await update.message.reply_text(f"🔊 讀咗：{said[:60]}")
         return
-    for _h in (_nag_handle, _focus_handle, _battery_handle):
+    for _h in (_nag_handle, _focus_handle, _bthead_handle, _battery_handle):
         _hr = _h(t, _cid0)
         if _hr is not None:
             await update.message.reply_text(_hr)
