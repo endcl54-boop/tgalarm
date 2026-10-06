@@ -1001,7 +1001,21 @@ def _battery_chg(d: dict) -> bool:
 
 
 def _battery_status() -> tuple:
-    """回傳 (剩電%, 充電中?, 溫度℃ or None) 或 (None, None, 錯誤訊息)。"""
+    """回傳 (剩電%, 充電中?, 溫度℃ or None) 或 (None, None, 錯誤訊息)。
+    2026-10-06 加固：Termux:API 偶發死火（真機個案：13:2x 一次
+    Permission denied—sysfs fallback 又被 vivo 擋），retry 一發。"""
+    for attempt in (1, 2):
+        r = _battery_status_once()
+        if r[0] is not None:
+            return r
+        if attempt == 1:
+            import time as _t
+            _t.sleep(3)
+    return r
+
+
+def _battery_status_once() -> tuple:
+    """單發讀電（termux-battery-status → sysfs 後備）。"""
     try:
         r = subprocess.run(["termux-battery-status"], capture_output=True,
                            text=True, timeout=6)
