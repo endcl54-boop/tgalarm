@@ -73,7 +73,12 @@ WEBS_PATH = os.path.expanduser(os.environ.get("TGALARM_WEBS", "~/.tgalarm/webs.j
 COUNTDOWNS_PATH = os.path.expanduser(
     os.environ.get("TGALARM_COUNTDOWNS", "~/.tgalarm/countdowns.json"))
 TODO_PATH = os.path.expanduser(os.environ.get("TGALARM_TODO", "~/.tgalarm/todo.json"))
-_YT_PKG = "com.google.android.youtube"
+# YouTube 類 app 候選（2026-10-06 個案：部機冇官方 YT，用緊 Morphe fork）：
+# 逐個試 am start，邊個裝咗用邊個；_YT_PKG 留首選名做相容
+_YT_CANDIDATES = ("com.google.android.youtube",
+                  "app.morphe.android.youtube",
+                  "app.morphe.android.apps.youtube.music")
+_YT_PKG = _YT_CANDIDATES[0]
 
 
 def _read_config_file() -> dict:
@@ -2507,8 +2512,12 @@ def _play(url: str, shuffle: bool = False) -> tuple:
     """優先直開 YouTube app（穩陣快），失敗先交畀系統揀 app。
     回傳 (成功與否, 訊息)；成功但只開到歌單頁（唔自動播）時訊息 = "NO_AUTOLIST"。"""
     target, auto = _autoplay_url(url, shuffle)
-    ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW",
-                          "-d", target, _YT_PKG])
+    ok = out = False
+    for pkg in _YT_CANDIDATES:
+        ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW",
+                              "-d", target, pkg])
+        if ok:
+            break
     if not ok:
         ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW", "-d", target])
     if ok and not auto:
@@ -2542,9 +2551,14 @@ def _stop() -> tuple:
         if ok:
             run_intent(["termux-media-player", "stop"])
             return True, "audio-focus"
-    ok, out = run_intent(["/system/bin/am", "force-stop", _YT_PKG])
-    if not ok:
-        ok, out = run_intent(["am", "force-stop", _YT_PKG])
+    ok = out = False
+    for am0 in ("/system/bin/am", "am"):
+        for pkg in _YT_CANDIDATES:
+            ok, out = run_intent([am0, "force-stop", pkg])
+            if ok:
+                break
+        if ok:
+            break
     if ok:
         return True, "force-stop"
     ok, out = run_intent(["am", "start", "-a", "android.intent.action.MAIN",

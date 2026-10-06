@@ -820,8 +820,11 @@ class TestStopFallback(unittest.TestCase):
         self.assertEqual(calls, [["/system/bin/am", "force-stop", bot._YT_PKG]])
 
     def test_fallback_to_path_am(self):
-        seq = iter([(False, "termux-am 唔支援"), (True, "")])
-        bot.run_intent = lambda cmd, t=0: next(seq)
+        # 2026-10-06：三候選逐個試（官方→Morphe YT→Morphe Music），全失敗先跳 PATH am
+        def fake(cmd, t=0):
+            return ((False, "被擋") if cmd[0] == "/system/bin/am"
+                    else (True, ""))
+        bot.run_intent = fake
         ok, _ = bot._stop()
         self.assertTrue(ok)
 
@@ -2453,6 +2456,44 @@ class TestTakeawaySched(unittest.TestCase):
         # 即開即收舊文法照舊
         self.assertIn("開", bot._takeaway_handle("外賣", 1))
         self.assertIn("收工", bot._takeaway_handle("外賣結束", 1))
+
+
+class TestPlayCandidates(unittest.TestCase):
+    """_play 候選 app 鏈：部機冇官方 YT 時用 Morphe fork（2026-10-06 個案）。"""
+
+    def setUp(self):
+        self.old = bot.run_intent
+        self.oauto = bot._autoplay_url
+        bot._autoplay_url = lambda u, sh=False: (u, True)
+
+    def tearDown(self):
+        bot.run_intent, bot._autoplay_url = self.old, self.oauto
+
+    def test_uses_installed_candidate(self):
+        calls = []
+
+        def fake(cmd, t=0):
+            calls.append(cmd)
+            return (cmd[-1] != bot._YT_CANDIDATES[0],
+                    "" if cmd[-1] != bot._YT_CANDIDATES[0] else "err")
+        bot.run_intent = fake
+        ok, _ = bot._play("https://www.youtube.com/watch?v=abc")
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2)              # 官方敗 → Morphe YT
+        self.assertEqual(calls[1][-1], bot._YT_CANDIDATES[1])
+
+    def test_fallback_no_pkg_when_all_fail(self):
+        calls = []
+
+        def fake(cmd, t=0):
+            calls.append(cmd)
+            return len(cmd) == 6, ""                 # 淨 no-pkg 先得
+        bot.run_intent = fake
+        ok, _ = bot._play("https://www.youtube.com/watch?v=abc")
+        self.assertTrue(ok)
+        self.assertEqual(calls[-1][-1],
+                         "https://www.youtube.com/watch?v=abc")
+        self.assertEqual(len(calls), 4)
 
 
 class TestPlaylistCache(unittest.TestCase):
