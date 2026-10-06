@@ -147,7 +147,7 @@ HELP = (
     "・計時 25分鐘 攞集運（時鐘app響＋到點讀你聽；取消 N 淨刪語音）\n"
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
-    "・外賣模式：打「外賣」開——計時提早 5 分鐘響，hhmm 後面數字＝單號；「外賣結束」收工\n"
+    "・外賣模式：「外賣」即刻開（hhmm 後數字＝單號）；「外賣結束」收工；「1100 外賣」／「1400 外賣結束」＝排定自動開/收\n"
     "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
     "🎧 耳機（即查藍牙耳機電量）・耳機守 60（≤60% 提你叉電）・耳機守完\n"
@@ -944,9 +944,26 @@ def _takeaway_set(on: bool) -> None:
     _save_json(TAKEAWAY_PATH, _TAKEAWAY)
 
 
-def _takeaway_handle(t: str):
+def _takeaway_handle(t: str, chat_id: int = 0):
     """外賣模式開關（2026-09-27 用戶加）：開咗之後所有計時提早 5 分鐘響，
-    直到「外賣結束」。回傳回覆文字；None=唔關事。"""
+    直到「外賣結束」。2026-10-06 加排程版：「1100 外賣」／「1400 外賣結束」
+    （空格可省）＝排定自動開／收（一次過 job）。回傳回覆文字；None=唔關事。"""
+    m = re.fullmatch(r"(\d{3,4})\s*外賣\s*(結束|收工|收)?", t)
+    if m:
+        v = m.group(1)
+        hh, mm = int(v[:-2]), int(v[-2:])
+        if hh > 23 or mm > 59:
+            return "❓ 時間要 hhmm。例：1100 外賣／1400 外賣結束"
+        off = bool(m.group(2))
+        now = dt.datetime.now()
+        nxt = _next_occurrence(now, hh, mm)
+        job = _add_simple_job(chat_id, {
+            "type": "takeaway_off" if off else "takeaway_on",
+            "chat_id": chat_id, "hh": hh, "mm": mm,
+            "next": nxt.isoformat()})
+        day = "今日" if nxt.date() == now.date() else "聽日"
+        act = "收外賣模式" if off else "開外賣模式（計時提早 5 分鐘響）"
+        return f"{'🏁' if off else '🛵'} 已排定（#{job['id']}）：{day} {hh:02d}:{mm:02d} 自動{act}"
     if t in ("外賣", "外賣開", "叫外賣", "外賣模式"):
         if _TAKEAWAY.get("on"):
             return "🛵 外賣模式開緊——計時照樣提早 5 分鐘響。「外賣結束」收工。"
@@ -2631,6 +2648,10 @@ def _fmt_job_content(j: dict) -> str:
         return f"電量守 ≤{j.get('thr', 20)}%"
     if j.get("type") == "bthead":
         return f"耳機守 ≤{j.get('thr', 60)}%"
+    if j.get("type") == "takeaway_on":
+        return "排定開外賣模式"
+    if j.get("type") == "takeaway_off":
+        return "排定收外賣模式"
     if j.get("type") in ("sched_pause", "sched_resume"):
         act = "暫停" if j["type"] == "sched_pause" else "繼續"
         ids = j.get("ids") or []
@@ -2660,6 +2681,7 @@ def _fmt_jobs(now: dt.datetime) -> str:
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
                 "bell": "⏰", "weather": "🌤", "web": "🌐", "nag": "💧",
                 "focus": "🎯", "battery": "🔋", "bthead": "🎧",
+                "takeaway_on": "🛵", "takeaway_off": "🏁",
                 "sched_pause": "⏸", "sched_resume": "▶️"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
@@ -2728,6 +2750,17 @@ async def _fire_later(job: dict, delay: float) -> None:
     now = dt.datetime.now()
     jtype = job.get("type", "play")
     defer_msg = False          # nav 彈窗先行時：訊息喺延遲任務送，唔喺度送
+    if jtype in ("takeaway_on", "takeaway_off"):   # 排定自動開/收外賣（2026-10-06）
+        _takeaway_set(jtype == "takeaway_on")
+        when = f"{job['hh']:02d}:{job['mm']:02d}"
+        msg = (f"🛵 {when} 外賣模式自動開——計時提早 5 分鐘響"
+               if jtype == "takeaway_on"
+               else f"🏁 {when} 外賣模式自動收工——計時還原")
+        await _send_safe(job["chat_id"], msg, "外賣排程")
+        await _say("外賣模式開" if jtype == "takeaway_on" else "外賣模式收工")
+        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
+        _TASKS.pop(job["id"], None)
+        return
     if jtype in ("sched_pause", "sched_resume"):   # 排定日期暫停/繼續（2026-10-04）
         ids = job.get("ids") or []
         if jtype == "sched_pause":
@@ -4578,11 +4611,11 @@ async def _on_message(update, context):
     if m:
         await update.message.reply_text(_time_reply(m.group(1)))
         return
-    _tw = _takeaway_handle(t)
+    _cid0 = update.effective_chat.id if getattr(update, "effective_chat", None) else 0
+    _tw = _takeaway_handle(t, _cid0)
     if _tw is not None:
         await update.message.reply_text(_tw)
         return
-    _cid0 = update.effective_chat.id if getattr(update, "effective_chat", None) else 0
     _cd = _countdown_handle(t, _cid0)
     if _cd is not None:
         await update.message.reply_text(_cd)

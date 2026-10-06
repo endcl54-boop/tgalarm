@@ -2385,6 +2385,76 @@ class TestVolPlay(unittest.TestCase):
             bot.JOBS_PATH, bot._TASKS, bot._arm = self._oj, self._ot, self._oarm
 
 
+class TestTakeawaySched(unittest.TestCase):
+    """HHMM 外賣／HHMM 外賣結束：排定自動開／收（2026-10-06 用戶個案）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot, self._oarm = bot.JOBS_PATH, dict(bot._TASKS), bot._arm
+        self._otk, self._oss = dict(bot._TAKEAWAY), bot._send_safe
+        self._osay = bot._say
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        bot._TAKEAWAY["on"] = False
+        self.sent = []
+        self.said = []
+
+        async def fs(cid, msg, tag=""):
+            self.sent.append((cid, msg))
+        bot._send_safe = fs
+
+        async def sy(text, delay=0):
+            self.said.append(text)
+        bot._say = sy
+
+    def tearDown(self):
+        bot.JOBS_PATH, bot._TASKS, bot._arm = self._oj, self._ot, self._oarm
+        bot._TAKEAWAY.clear()
+        bot._TAKEAWAY.update(self._otk)
+        bot._send_safe, bot._say = self._oss, self._osay
+
+    def test_sched_on_off_and_fire(self):
+        r = bot._takeaway_handle("1100外賣", 1)       # 冇空格都收
+        self.assertIn("已排定", r)
+        self.assertIn("自動開外賣模式", r)
+        job = bot._jobs()[0]
+        self.assertEqual((job["type"], job["hh"], job["mm"], job["chat_id"]),
+                         ("takeaway_on", 11, 0, 1))
+        r2 = bot._takeaway_handle("1400 外賣結束", 1)
+        self.assertIn("自動收外賣模式", r2)
+        self.assertEqual([j["type"] for j in bot._jobs()],
+                         ["takeaway_on", "takeaway_off"])
+        self.assertIn("❓", bot._takeaway_handle("2560 外賣", 1))  # 壞時間
+        # fire on：模式開＋TG＋語音＋job 自清
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(dict(bot._jobs()[0]), 0))
+        finally:
+            loop.close()
+        self.assertTrue(bot._TAKEAWAY["on"])
+        self.assertIn("外賣模式自動開", self.sent[-1][1])
+        self.assertEqual([j["type"] for j in bot._jobs()],
+                         ["takeaway_off"])
+        # fire off
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(dict(bot._jobs()[0]), 0))
+        finally:
+            loop.close()
+        self.assertFalse(bot._TAKEAWAY["on"])
+        self.assertIn("自動收工", self.sent[-1][1])
+        self.assertEqual(bot._jobs(), [])
+        self.assertEqual(self.said[-1], "外賣模式收工")
+        # 列表顯示
+        bot._takeaway_handle("0900 外賣", 1)
+        j = bot._jobs()[0]
+        self.assertIn("🛵", bot._fmt_jobs(bot.dt.datetime.now()))
+        self.assertEqual(bot._fmt_job_content(j), "排定開外賣模式")
+        # 即開即收舊文法照舊
+        self.assertIn("開", bot._takeaway_handle("外賣", 1))
+        self.assertIn("收工", bot._takeaway_handle("外賣結束", 1))
+
+
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
 
