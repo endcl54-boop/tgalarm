@@ -964,6 +964,20 @@ def _takeaway_handle(t: str):
 
 # ---- 電量（termux-battery-status 優先，sysfs 後備）----
 
+def _battery_chg(d: dict) -> bool:
+    """termux-battery-status JSON → 充電中？
+    ★plugged 新版係字串（"PLUGGED_AC"/"UNPLUGGED"），舊版係整數——
+    bool("UNPLUGGED")=True 曾令 chg 永遠 True、電量守永久靜默
+    （2026-10-06 用戶個案破案），必要型別分流＋startswith（"UNPLUGGED"
+    內含 PLUGGED 子串，唔可以用 in）。"""
+    if str(d.get("status", "")).lower() in ("charging", "full"):
+        return True
+    p = d.get("plugged")
+    if isinstance(p, str):
+        return p.upper().startswith("PLUGGED")
+    return bool(p)
+
+
 def _battery_status() -> tuple:
     """回傳 (剩電%, 充電中?, 溫度℃ or None) 或 (None, None, 錯誤訊息)。"""
     try:
@@ -972,8 +986,7 @@ def _battery_status() -> tuple:
         if r.returncode == 0:
             d = json.loads(r.stdout.strip() or "{}")
             pct = int(d.get("percentage", -1))
-            chg = (str(d.get("status", "")).lower() in ("charging", "full")
-                   or bool(d.get("plugged")))
+            chg = _battery_chg(d)
             temp = d.get("temperature")
             temp = round(float(temp) / 10.0, 1) if temp else None
             if pct >= 0:
