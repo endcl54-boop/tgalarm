@@ -2496,8 +2496,9 @@ def _autoplay_url(url: str, shuffle: bool = False) -> tuple:
             vid = random.choice(vids) if shuffle else vids[0]
             return f"https://www.youtube.com/watch?v={vid}&list={m.group(1)}", True
         return url, False
-    # watch 連結 / youtu.be / 其他：YouTube app 會直接進入播放頁
-    return url, ("watch?v=" in url or "youtu.be/" in url)
+    # watch／youtu.be／live（直播電台，2026-10-06 用戶轉用）：app 直開即播
+    return url, ("watch?v=" in url or "youtu.be/" in url
+                 or bool(re.search(r"/live/([\w-]{11})", url)))
 
 
 def _media_vol_max() -> int | None:

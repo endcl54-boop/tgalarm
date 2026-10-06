@@ -2469,6 +2469,12 @@ class TestPlayCandidates(unittest.TestCase):
     def tearDown(self):
         bot.run_intent, bot._autoplay_url = self.old, self.oauto
 
+    def test_live_link_autoplays(self):
+        """live 電台短link：免歌單撈 id，直開即播（2026-10-06 用戶轉用）。"""
+        url, auto = bot._autoplay_url("https://www.youtube.com/live/xf9Ejt4OmWQ")
+        self.assertEqual(url, "https://www.youtube.com/live/xf9Ejt4OmWQ")
+        self.assertTrue(auto)
+
     def test_uses_installed_candidate(self):
         calls = []
 
