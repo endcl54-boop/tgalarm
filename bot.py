@@ -2455,16 +2455,32 @@ _PL_CACHE: dict = {}            # list_id -> (timestamp, [videoId])；session �
 _PL_CACHE_TTL = 6 * 3600        # 6 小時內重播 = 零網絡直達 am start
 
 
+_PL_DISK = os.path.expanduser("~/.tgalarm/playlist_ids.json")
+
+
 def _playlist_videos(list_id: str) -> list:
     """由 YouTube playlist 抽出全部 videoId（去重、保持順序；唔使 API key）。
     優先 6 小時 session 快取（上次成功嘅就算過期都攞嚟做後備），
-    miss 先行官方 RSS，再失敗爬頁面。最快響應：第二次起唔出網。"""
+    miss 先行官方 RSS，再失敗爬頁面。最快響應：第二次起唔出網。
+    2026-10-06 加持久快取（playlist_ids.json）：Google 對非瀏覽器 client
+    派殼頁（innertube/piped 全堵，真機實證），server 端抓取唔再穩陣——
+    種過一次（沙盒代抓）就永久有開場 id，fetch 得到就自動 refresh。"""
     hit = _PL_CACHE.get(list_id)
     if hit and dt.datetime.now().timestamp() - hit[0] < _PL_CACHE_TTL:
         return hit[1]
+    if not hit and os.path.exists(_PL_DISK):
+        d = _load_json(_PL_DISK, {})
+        if d.get(list_id):
+            _PL_CACHE[list_id] = (0.0, list(d[list_id]))   # ts=0＝非新鮮，淨做後備
+            hit = _PL_CACHE[list_id]
     vids = _playlist_videos_rss(list_id) or _playlist_videos_html(list_id)
     if vids:
         _PL_CACHE[list_id] = (dt.datetime.now().timestamp(), vids)
+        try:
+            _save_json(_PL_DISK,
+                       {k: v for k, (_t, v) in _PL_CACHE.items() if v})
+        except OSError:
+            pass
         return vids
     return hit[1] if hit else []   # 網絡死檔：拎到舊快取總好過開返歌單頁
 

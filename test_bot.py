@@ -2496,6 +2496,37 @@ class TestPlayCandidates(unittest.TestCase):
         self.assertEqual(len(calls), 4)
 
 
+class TestPlaylistDiskCache(unittest.TestCase):
+    """playlist_ids.json 持久快取：種一次永久有開場 id（2026-10-06）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._odisk, self._ocache = bot._PL_DISK, dict(bot._PL_CACHE)
+        self._orss, self._ohtml = (bot._playlist_videos_rss,
+                                   bot._playlist_videos_html)
+        bot._PL_DISK = os.path.join(self._tmp, "pl.json")
+        bot._PL_CACHE.clear()
+        bot._playlist_videos_rss = lambda lid: []
+        bot._playlist_videos_html = lambda lid: []
+
+    def tearDown(self):
+        bot._PL_DISK, bot._PL_CACHE = self._odisk, self._ocache
+        bot._playlist_videos_rss = self._orss
+        bot._playlist_videos_html = self._ohtml
+
+    def test_seed_loads_and_refreshes(self):
+        bot._save_json(bot._PL_DISK, {"PLx": ["a" * 11, "b" * 11]})
+        # 網絡全死 → 種子頂上
+        self.assertEqual(bot._playlist_videos("PLx"), ["a" * 11, "b" * 11])
+        self.assertEqual(bot._playlist_videos("冇種"), [])
+        # fetch 得到 → refresh＋寫回 disk
+        bot._PL_CACHE.clear()
+        bot._playlist_videos_rss = lambda lid: ["c" * 11]
+        self.assertEqual(bot._playlist_videos("PLx"), ["c" * 11])
+        self.assertEqual(bot._load_json(bot._PL_DISK, {}).get("PLx"),
+                         ["c" * 11])
+
+
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
 
