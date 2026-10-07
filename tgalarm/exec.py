@@ -148,6 +148,7 @@ def _execute_player(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime
         plurl, plerr = engine._resolve_playlist(pl_ref)
         if not plurl:
             return plerr
+        engine._stop_yt_before_web(wurl)   # YT link 會開 YT app：照劏
         if not engine.DRY_RUN:
             engine._shell_priv_exec("input keyevent KEYCODE_WAKEUP")
         okw, infow = engine.run_intent(engine.web_intent_cmd(wurl))

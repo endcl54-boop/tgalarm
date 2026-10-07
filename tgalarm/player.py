@@ -166,6 +166,22 @@ def _set_media_volume(pct: int) -> tuple:
 
 
 
+def _is_yt_url(u: str) -> bool:
+    """YouTube link 判定（2026-10-07 用戶令：網播網頁係 YT 都要劏）。"""
+    u = (u or "").lower()
+    return any(k in u for k in ("youtube.com/", "youtu.be/",
+                                "music.youtube.com"))
+
+
+def _stop_yt_before_web(u: str) -> None:
+    """網播開網頁前：YT link 經 VIEW 會撥去 YT app（唔係瀏覽器），
+    要同播歌一樣先 force-stop，唔係帶返舊 task 舊片。"""
+    if not _is_yt_url(u) or engine.DRY_RUN:
+        return
+    for pkg in engine._YT_CANDIDATES:
+        engine._shell_priv_exec(f"am force-stop {pkg}")
+
+
 def _play(url: str, shuffle: bool = False) -> tuple:
     """優先直開 YouTube app（穩陣快），失敗先交畀系統揀 app。
     播前先 force-stop（用戶 2026-10-07 指定）：app 行緊嗰陣 am start 淨係帶前

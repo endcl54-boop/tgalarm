@@ -2865,6 +2865,35 @@ class TestWebPlay(unittest.TestCase):
         self.assertIn("🌐", r)
         self.assertIn("▶️", r)
 
+    def test_yt_web_force_stopped(self):
+        """網播網頁係 YT link：開頁前要 force-stop（2026-10-07 用戶令）。"""
+        self.assertTrue(bot._is_yt_url("https://www.youtube.com/watch?v=x"))
+        self.assertTrue(bot._is_yt_url("https://youtu.be/abc"))
+        self.assertFalse(bot._is_yt_url("https://news.rthk.hk"))
+        import tgalarm.engine as _eng  # 域行 engine.X：要 patch 入 engine 模組
+        old_wt = bot._web_target
+        bot._web_target = lambda ref: (ref, None)   # passthrough：留住 YT link
+        calls = []
+        old_priv = _eng._shell_priv_exec
+        odry = _eng.DRY_RUN
+        old_run, old_play = bot.run_intent, bot._play
+        _eng._shell_priv_exec = lambda cmd, t=0: (
+            calls.append(cmd), (True, ""))[1]
+        _eng.DRY_RUN = False
+        bot.run_intent = lambda cmd, t=0: (True, "")
+        bot._play = lambda url, sh=False: (True, "")
+        try:
+            bot._execute_player(
+                bot.PlayerCmd("webplay", ref="https://youtu.be/abc",
+                              extra="loHouse"), 1, bot.dt.datetime.now())
+        finally:
+            _eng._shell_priv_exec = old_priv
+            _eng.DRY_RUN = odry
+            bot._web_target = old_wt
+            bot.run_intent, bot._play = old_run, old_play
+        stops = [c for c in calls if "force-stop" in c]
+        self.assertGreaterEqual(len(stops), 3)   # 三候選都劏
+
     def test_fire_webplay(self):
         import asyncio as _a
         calls = []

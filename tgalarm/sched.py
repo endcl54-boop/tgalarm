@@ -413,6 +413,7 @@ async def _fire_later(job: dict, delay: float) -> None:
         engine._arm(job)
         return
     elif jtype == "webplay":    # 網播：開網頁→即刻播歌（2026-10-07 用戶令）
+        engine._stop_yt_before_web(job.get("url", ""))
         if not engine.DRY_RUN:
             engine._shell_priv_exec("input keyevent KEYCODE_WAKEUP")
         okw, _infow = engine.run_intent(
