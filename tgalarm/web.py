@@ -13,6 +13,11 @@ def _webs() -> dict:
     return engine._load_json(engine.WEBS_PATH, {})
 
 
+def _combos() -> dict:
+    """網播組合：號碼→{web, pl}（2026-10-07 用戶令：網播 1=x+y）。"""
+    return engine._load_json(engine.COMBOS_PATH, {})
+
+
 
 def _web_target(ref: str) -> tuple:
     """名→已儲 url；http(s) 開頭→直接用。回傳 (url, None) 或 (None, 錯誤訊息)。"""

@@ -102,12 +102,50 @@ def _execute_player(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime
         msg = (f"🗓 已排程（{kind} #{job['id']}）：{when} "
                f"導航去「{job['label']}」（{engine._mode_label(mode)}）")
         return msg + engine._replaced_note(replaced)
+    if a == "combo_set":
+        # 組合定義：網播 1=網頁+歌單（2026-10-07 用戶令）
+        parts = cmd.extra.split("|")
+        w, p = parts[0].strip(), parts[1].strip()
+        wurl, werr = engine._web_target(w)
+        if not wurl:
+            return f"❓ 網頁：{werr}"
+        plurl, plerr = engine._resolve_playlist(p)
+        if not plurl:
+            return f"❓ 歌單：{plerr}"
+        combos = engine._combos()
+        covered = cmd.ref in combos
+        combos[cmd.ref] = {"web": w, "pl": p}
+        engine._save_json(engine.COMBOS_PATH, combos)
+        return (f"🧩 組合 {cmd.ref} 已儲{'（蓋過舊）' if covered else ''}："
+                f"{w}＋{p}——之後「網播 {cmd.ref}」／「每日HHMM 網播 {cmd.ref}」")
+    if a == "combo_list":
+        combos = engine._combos()
+        if not combos:
+            return "🧩 仲未有組合。例：網播 1=新聞+loHouse"
+        lines = ["🧩 網播組合："]
+        for k, v in sorted(combos.items(), key=lambda x: int(x[0])):
+            lines.append(f"・{k}＝{v['web']}＋{v['pl']}（網播 {k}）")
+        return "\n".join(lines)
+    if a == "combo_del":
+        combos = engine._combos()
+        if cmd.ref not in combos:
+            return f"❓ 冇組合 {cmd.ref}。send「組合」睇清單"
+        combos.pop(cmd.ref)
+        engine._save_json(engine.COMBOS_PATH, combos)
+        return f"🗑 組合 {cmd.ref} 已刪"
     if a == "webplay":
-        # 網播：開網頁→即刻播歌（2026-10-07 用戶令；一條指令兩動作）
-        wurl, werr = engine._web_target(cmd.ref)
+        # 網播：開網頁→即刻播歌（組合號＝名咁用）
+        web_ref, pl_ref = cmd.ref, cmd.extra
+        if web_ref.isdigit():
+            combo = engine._combos().get(web_ref)
+            if not combo:
+                return (f"❓ 冇組合 {web_ref}。send「組合」睇清單，"
+                        f"或者「網播 {web_ref}=網頁+歌單」定義")
+            web_ref, pl_ref = combo["web"], combo["pl"]
+        wurl, werr = engine._web_target(web_ref)
         if not wurl:
             return werr
-        plurl, plerr = engine._resolve_playlist(cmd.extra)
+        plurl, plerr = engine._resolve_playlist(pl_ref)
         if not plurl:
             return plerr
         if not engine.DRY_RUN:
@@ -115,17 +153,25 @@ def _execute_player(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime
         okw, infow = engine.run_intent(engine.web_intent_cmd(wurl))
         okp, outp = engine._play(plurl, cmd.shuffle)
         wnote = "" if okw else f"\n⚠️ 網頁開唔到：{infow[:80]}"
+        tag = f"🧩 組合 {cmd.ref}＝" if cmd.ref.isdigit() else ""
         if okp:
-            return f"🌐 開網頁「{cmd.ref}」＋▶️ 播「{cmd.extra}」{wnote}"
-        return f"🌐 網頁開咗，但❌ 播唔到：{outp[:120]}" + wnote
+            return (f"{tag}🌐 開網頁「{web_ref}」＋▶️ 播「{pl_ref}」{wnote}")
+        return (f"{tag}🌐 網頁開咗，但❌ 播唔到：{outp[:120]}" + wnote)
     if a in ("sched_webplay", "sched_webplay_daily"):
-        wurl, werr = engine._web_target(cmd.ref)
+        web_ref, pl_ref = cmd.ref, cmd.extra
+        if web_ref.isdigit():
+            combo = engine._combos().get(web_ref)
+            if not combo:
+                return (f"❓ 冇組合 {web_ref}。send「組合」睇清單，"
+                        f"或者「網播 {web_ref}=網頁+歌單」定義")
+            web_ref, pl_ref = combo["web"], combo["pl"]
+        wurl, werr = engine._web_target(web_ref)
         if not wurl:
             return werr
-        plurl, plerr = engine._resolve_playlist(cmd.extra)
+        plurl, plerr = engine._resolve_playlist(pl_ref)
         if not plurl:
             return plerr
-        label = f"{cmd.ref}＋{cmd.extra}"
+        label = f"{web_ref}＋{pl_ref}"
         job, replaced = engine._add_job(cmd, chat_id, now, url=wurl,
                                         label=label, pl=plurl)
         kind = "每日" if a == "sched_webplay_daily" else "一次"

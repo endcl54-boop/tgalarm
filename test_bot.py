@@ -2690,6 +2690,104 @@ class TestCalm(unittest.TestCase):
             {"type": "calm", "hh": 21, "mm": 30}))
 
 
+class TestWebPlayCombo(unittest.TestCase):
+    """網播組合：網播 1=X+Y 定義・網播 1 跑・排程都收（拍板齊）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oc = bot.COMBOS_PATH
+        bot.COMBOS_PATH = os.path.join(self._tmp, "c.json")
+        self._ow, self._or2 = bot._web_target, bot._resolve_playlist
+        bot._web_target = lambda ref: (
+            ("https://news.example", None) if ref in ("新聞", "天氣")
+            else (None, f"搵唔到網頁「{ref}」"))
+        bot._resolve_playlist = lambda ref: ("pl-url", ref) if ref else (
+            None, "err")
+
+    def tearDown(self):
+        bot.COMBOS_PATH = self._oc
+        bot._web_target, bot._resolve_playlist = self._ow, self._or2
+
+    def test_define_list_delete(self):
+        r = bot._execute_player(
+            bot.PlayerCmd("combo_set", ref="1", extra="新聞|loHouse"), 1,
+            bot.dt.datetime.now())
+        self.assertIn("🧩", r)
+        self.assertIn("已儲", r)
+        self.assertEqual(bot._combos().get("1"),
+                         {"web": "新聞", "pl": "loHouse"})
+        # 蓋過
+        r2 = bot._execute_player(
+            bot.PlayerCmd("combo_set", ref="1", extra="天氣|rain"), 1,
+            bot.dt.datetime.now())
+        self.assertIn("蓋過", r2)
+        self.assertEqual(bot._combos()["1"]["pl"], "rain")
+        self.assertIn("1＝天氣＋rain", bot._execute_player(
+            bot.PlayerCmd("combo_list"), 1, bot.dt.datetime.now()))
+        self.assertIn("🗑", bot._execute_player(
+            bot.PlayerCmd("combo_del", ref="1"), 1, bot.dt.datetime.now()))
+        self.assertIn("❓", bot._execute_player(
+            bot.PlayerCmd("combo_del", ref="1"), 1, bot.dt.datetime.now()))
+        # 壞名
+        self.assertIn("❓", bot._execute_player(
+            bot.PlayerCmd("combo_set", ref="2", extra="唔存在網頁|loHouse"),
+            1, bot.dt.datetime.now()))
+
+    def test_parse_and_run_combo(self):
+        c = bot.parse_player("網播 1=新聞+loHouse")
+        self.assertEqual((c.action, c.ref, c.extra),
+                         ("combo_set", "1", "新聞|loHouse"))
+        c2 = bot.parse_player("網播 1")
+        self.assertEqual((c2.action, c2.ref), ("webplay", "1"))
+        c3 = bot.parse_player("每日2130 網播 1")
+        self.assertEqual((c3.action, c3.ref),
+                         ("sched_webplay_daily", "1"))
+        # 定義後即刻跑：web 先 play 後
+        bot._execute_player(
+            bot.PlayerCmd("combo_set", ref="1", extra="新聞|loHouse"), 1,
+            bot.dt.datetime.now())
+        calls = []
+        old_run, old_play = bot.run_intent, bot._play
+        bot.run_intent = lambda cmd, t=0: (calls.append("web"), (True, ""))[1]
+        bot._play = lambda url, sh=False: (
+            calls.append(("play", url)), (True, ""))[1]
+        try:
+            r = bot._execute_player(bot.PlayerCmd("webplay", ref="1"), 1,
+                                    bot.dt.datetime.now())
+        finally:
+            bot.run_intent, bot._play = old_run, old_play
+        self.assertEqual([c[0] if isinstance(c, tuple) else c
+                          for c in calls], ["web", "play"])
+        self.assertEqual(calls[1][1], "pl-url")
+        self.assertIn("組合 1", r)
+
+    def test_sched_combo_expands(self):
+        bot._execute_player(
+            bot.PlayerCmd("combo_set", ref="1", extra="新聞|loHouse"), 1,
+            bot.dt.datetime.now())
+        holder = {}
+        old = bot._add_job
+
+        def fake_add(cmd, chat_id, now, url="", seconds=0, mode="d",
+                     label="", pl=""):
+            holder.update(url=url, pl=pl, label=label)
+            return ({"id": 90, "next_dt": now}, [])
+        bot._add_job = fake_add
+        try:
+            r = bot._execute_player(
+                bot.PlayerCmd("sched_webplay_daily", ref="1", hour=21,
+                              minute=30), 1, bot.dt.datetime.now())
+        finally:
+            bot._add_job = old
+        self.assertIn("已排程", r)
+        self.assertEqual(holder["url"], "https://news.example")
+        self.assertEqual(holder["pl"], "pl-url")
+        self.assertEqual(holder["label"], "新聞＋loHouse")
+        # 冇組合
+        self.assertIn("❓", bot._execute_player(
+            bot.PlayerCmd("webplay", ref="9"), 1, bot.dt.datetime.now()))
+
+
 class TestWebPlay(unittest.TestCase):
     """網播＝開網頁＋播歌一條 job（2026-10-07 用戶令；拍板：網頁先即刻播）。"""
 

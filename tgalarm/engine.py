@@ -71,6 +71,8 @@ CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/co
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
 LOCK_PATH = os.path.expanduser(os.environ.get("TGALARM_LOCK", "~/.tgalarm/bot.lock"))
 SEAL_LAST_PATH = os.path.expanduser("~/.tgalarm/seal_last.json")
+COMBOS_PATH = os.path.expanduser(
+    os.environ.get("TGALARM_COMBOS", "~/.tgalarm/combos.json"))
 QUIET_PATH = os.path.expanduser(
     os.environ.get("TGALARM_QUIET", "~/.tgalarm/quiet.json"))
 TAKEAWAY_PATH = os.path.expanduser(
@@ -780,6 +782,7 @@ from .core import (  # registry 別名（same dict object；bot.X 測試路徑�
 )
 
 _calm_handle = _calm_mod.handle
+_combos = _web_mod._combos
 _quiet_handle = _quiet_mod.handle
 _quiet_in_window = _quiet_mod.in_window
 _findef_route = _finance_mod.route

@@ -241,12 +241,19 @@ def parse_player(text: str) -> engine.PlayerCmd | None:
             nm = engine.re.match(r"(?:開導航|導航|去)\s*(.+)$", rest)
             if nm:
                 return engine.PlayerCmd("sched_nav_daily", hour=hh, minute=mm, ref=nm.group(1).strip())
-            npm = engine.re.match(r"網播\s*(\S+)\s+(\S+)\s*$", rest)
+            npm = engine.re.match(r"網播\s*(.+)$", rest)
             if npm:
-                # 網播＝開網頁＋播歌一條 job（2026-10-07 用戶令）
-                return engine.PlayerCmd("sched_webplay_daily", hour=hh,
-                                 minute=mm, ref=npm.group(1),
-                                 extra=npm.group(2))
+                # 網播＝開網頁＋播歌一條 job（組合號都收）
+                inner = npm.group(1).strip()
+                nm2 = engine.re.fullmatch(r"(\d+)", inner)
+                if nm2:
+                    return engine.PlayerCmd("sched_webplay_daily", hour=hh,
+                                     minute=mm, ref=nm2.group(1))
+                om2 = engine.re.fullmatch(r"(\S+)\s+(\S+)", inner)
+                if om2:
+                    return engine.PlayerCmd("sched_webplay_daily", hour=hh,
+                                     minute=mm, ref=om2.group(1),
+                                     extra=om2.group(2))
             wm = engine.re.match(r"(?:開網頁|網頁|開)\s*(.+)$", rest)
             if wm:
                 return engine.PlayerCmd("sched_web_daily", hour=hh, minute=mm, ref=wm.group(1).strip())
@@ -270,11 +277,18 @@ def parse_player(text: str) -> engine.PlayerCmd | None:
         nm = engine.re.match(r"(?:開導航|導航|去)\s*(.+)$", rest)
         if nm:
             return engine.PlayerCmd("sched_nav", hour=hh, minute=mm, ref=nm.group(1).strip())
-        npm = engine.re.match(r"網播\s*(\S+)\s+(\S+)\s*$", rest)
+        npm = engine.re.match(r"網播\s*(.+)$", rest)
         if npm:
-            return engine.PlayerCmd("sched_webplay", hour=hh,
-                             minute=mm, ref=npm.group(1),
-                             extra=npm.group(2))
+            inner = npm.group(1).strip()
+            nm2 = engine.re.fullmatch(r"(\d+)", inner)
+            if nm2:
+                return engine.PlayerCmd("sched_webplay", hour=hh,
+                                 minute=mm, ref=nm2.group(1))
+            om2 = engine.re.fullmatch(r"(\S+)\s+(\S+)", inner)
+            if om2:
+                return engine.PlayerCmd("sched_webplay", hour=hh,
+                                 minute=mm, ref=om2.group(1),
+                                 extra=om2.group(2))
         wm = engine.re.match(r"(?:開網頁|網頁|開)\s*(.+)$", rest)
         if wm:
             return engine.PlayerCmd("sched_web", hour=hh, minute=mm, ref=wm.group(1).strip())
@@ -290,9 +304,27 @@ def parse_player(text: str) -> engine.PlayerCmd | None:
             return engine.PlayerCmd("dests")  # 淨「導航」：顯示地點清單同用法
         return engine.PlayerCmd("nav", ref=m.group(1).strip())
     # [隨機]播 [名/連結]（「播放」要排喺「播」前面，否則「放」會被食入名）
-    wp = engine.re.match(r"^網播\s*(\S+)\s+(\S+)\s*$", s)
+    if engine.re.fullmatch(r"組合", s):
+        return engine.PlayerCmd("combo_list")
+    dm = engine.re.fullmatch(r"刪組合\s*(\d+)", s)
+    if dm:
+        return engine.PlayerCmd("combo_del", ref=dm.group(1))
+    wp = engine.re.match(r"^網播\s*(.+)$", s)
     if wp:
-        return engine.PlayerCmd("webplay", ref=wp.group(1), extra=wp.group(2))
+        inner = wp.group(1).strip()
+        # 組合定義：網播 1=網頁+歌單
+        dm2 = engine.re.fullmatch(r"(\d+)\s*=\s*(\S+)\s*\+\s*(\S+)", inner)
+        if dm2:
+            return engine.PlayerCmd("combo_set", ref=dm2.group(1),
+                             extra=f"{dm2.group(2)}|{dm2.group(3)}")
+        # 組合號執行：網播 1
+        nm3 = engine.re.fullmatch(r"(\d+)", inner)
+        if nm3:
+            return engine.PlayerCmd("webplay", ref=nm3.group(1))
+        om3 = engine.re.fullmatch(r"(\S+)\s+(\S+)", inner)
+        if om3:
+            return engine.PlayerCmd("webplay", ref=om3.group(1),
+                             extra=om3.group(2))
     m = engine.re.match(r"^/?(隨機播放|隨機播|播放|播|play)\s*(.*)$", s, engine.re.IGNORECASE)
     if m:
         ref, sh = engine._strip_shuffle(m.group(2))
