@@ -36,7 +36,7 @@ def config_get(key: str, default: str = "") -> str:
     return read_config_file(path).get(key, default).strip()
 
 
-# ---------------- Registry（strangler 接縫；S2/S3 起有第一批消費者） ----------------
+# ---------------- Registry（strangler 接縫；域模組到點處理器註冊表） ----------------
 
 # job type -> async fn(job, now)；_fire_later 逐步由 if 鏈改行呢張表
 FIRE_HANDLERS: dict = {}

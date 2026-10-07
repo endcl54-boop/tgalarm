@@ -19,6 +19,9 @@ def main() -> None:
         shutil.copytree(os.path.join(REPO, "tgalarm"),
                         os.path.join(stage, "tgalarm"),
                         ignore=shutil.ignore_patterns("__pycache__"))
+        if os.path.exists(os.path.join(REPO, "liar.py")):
+            shutil.copy(os.path.join(REPO, "liar.py"),
+                        os.path.join(stage, "liar.py"))
         subprocess.run(
             [sys.executable, "-m", "zipapp", stage, "--output", OUT,
              "--main", "tgalarm.app:main", "--python", "/usr/bin/env python3"],

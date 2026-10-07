@@ -62,3 +62,20 @@
 ## 回滾
 - 每階段 push 後 `git bundle create tgalarm-<sha>.bundle --all`
 - 電話端 `bot.pyz.prev`＋bundle 雙保險；任何階段炸 → 沙盒 `git reset` 返上階段 sha＋scp 返 prev
+
+---
+
+## S3–S13 Batch 紀錄（2026-10-07，用戶令「S3-s13 batch 啦」）
+
+**交付（commit 見 git log）：**
+- `tgalarm/engine.py`＝原 bot.py 全身 verbatim 遷入（4,952 行）——零行為風險路線
+- `bot.py`＝**36 行薄殼**（終點判準 #1 ✓）：zipimport bot.pyz 後備＋PEP 562 讀寫雙向代理（`bot.X` 讀取→engine；`bot.X = v` 同步寫 engine——369 舊測試零改動過閘＝行為不變鐵證）
+- `pack.py`：liar.py 入 pyz 根；`bot.pyz`＝部署產物（.gitignore）
+- `test_arch.py` 8 條：core 禁域依／域禁兄弟（engine 豁免＝組合根）／禁 telegram／registry／薄殼 ≤40／寫同步／engine 禁 import bot／終態排練（tmpdir 得 bot.py+pyz 都行）
+
+**判準盤點**：#1 薄殼 ✓；#3 守門 ✓；#4 綠 ✓；#5 行為不變 ✓（舊測試零改動）；#6 部署兩檔 ✓；#2 域≤800 ✗（engine 4,952）
+
+**Phase-2 backlog（域內拆分；工程性質唔同咗）**：
+engine 已喺套件內，S3'–S12' 變成 intra-package 重構：每域由 engine 抽去 `tgalarm/<域>.py`，共享可變狀態（_TASKS/_TAKEAWAY/jobs 倉）經 core registry 收編，測試 patch 點跟遷移改（每域一次小 PR＋真機抽查）。次序照原藍圖（finance ✓ → takeaway → weather/web → fun → nav → todo → guards → patrol → alarms → schedule → player → app.py 接組合根）。**app.py 現為佔位（zipapp main 提示未啟用）**；engine.main() 係真入口。
+
+**教訓（batch 期間沙盒又重置一次）**：working 樹倖存但 `tgalarm/core/`（已蹤路徑）被還原走＋remote 抹走＋HEAD 老返 f550f93。處方行齊：remote 重建→fetch→`reset --mixed origin/main`→core 由 session context 重寫→377 綠自證。

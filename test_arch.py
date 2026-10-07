@@ -36,8 +36,9 @@ class TestArchRules(unittest.TestCase):
         - 相對淨准 `.`／`.core`（兄弟域禁）
         """
         tdir = os.path.join(REPO, "tgalarm")
+        # engine.py 豁免：佢係組合根（S13 前 app.py 接手），唯一有權識各域
         domains = [f for f in os.listdir(tdir)
-                   if f.endswith(".py") and f != "__init__.py"]
+                   if f.endswith(".py") and f not in ("__init__.py", "engine.py")]
         self.assertIn("finance.py", domains)   # S1 第一域必在
         for fname in domains:
             src = open(os.path.join(tdir, fname), encoding="utf-8").read()
@@ -79,6 +80,33 @@ class TestRegistry(unittest.TestCase):
         self.assertIs(core.JOB_FORMATTERS["unit_test_x"], _f)
         del core.FIRE_HANDLERS["unit_test_x"]
         del core.JOB_FORMATTERS["unit_test_x"]
+
+
+class TestThinShell(unittest.TestCase):
+    """S13 終態判準：bot.py 薄殼 ≤40 行＋shim 寫同步＋engine 禁回頭 import bot。"""
+
+    def test_bot_py_is_thin(self):
+        n = len(open(os.path.join(REPO, "bot.py"),
+                     encoding="utf-8").read().splitlines())
+        self.assertLessEqual(n, 40, f"bot.py {n} 行——薄殼判準 40 行")
+
+    def test_shim_write_syncs_to_engine(self):
+        code = ("import bot, tgalarm.engine as e; "
+                "bot._ARCH_PROBE_X = 42; "
+                "assert e._ARCH_PROBE_X == 42; "
+                "assert bot._ARCH_PROBE_X == 42; "
+                "del bot._ARCH_PROBE_X; "
+                "assert not hasattr(e, '_ARCH_PROBE_X'); "
+                "print('SYNC_OK')")
+        r = subprocess.run([PY, "-c", code], cwd=REPO, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SYNC_OK", r.stdout)
+
+    def test_engine_never_imports_bot(self):
+        src = open(os.path.join(REPO, "tgalarm", "engine.py"),
+                   encoding="utf-8").read()
+        self.assertNotIn("import bot", src)   # 循環依賴禁令
 
 
 class TestZipapp(unittest.TestCase):
