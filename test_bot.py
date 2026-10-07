@@ -2460,6 +2460,7 @@ class TestTakeawaySched(unittest.TestCase):
         self.assertIn("開", bot._takeaway_handle("外賣", 1))
         self.assertIn("收工", bot._takeaway_handle("外賣結束", 1))
 
+
     def test_daily_prefix(self):
         """每日1100 外賣／每日1400 外賣結束＝日日自動開收（2026-10-07 用戶令）。"""
         r = bot._takeaway_handle("每日1100 外賣", 2)
@@ -2496,6 +2497,70 @@ class TestTakeawaySched(unittest.TestCase):
         expect = bot._next_occurrence(bot.dt.datetime.now(), 11, 0)
         self.assertEqual(left[0]["next"][:16], expect.isoformat()[:16])
         self.assertIn("外賣模式自動開", self.sent[-1][1])
+
+
+
+class TestMultiLineTakeaway(unittest.TestCase):
+    """多行訊息逐行都識外賣文法（2026-10-07 用戶三報：兩行一齊 send 全❓——
+    外賣文法淨喺成句比對有接，逐行批次層冇接）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot, self._oarm = bot.JOBS_PATH, dict(bot._TASKS), bot._arm
+        self._otp, self._otk = bot.TAKEAWAY_PATH, dict(bot._TAKEAWAY)
+        self._oown, self._osay, self._osend = (bot._ensure_owner, bot._say,
+                                               bot._send_safe)
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot.TAKEAWAY_PATH = os.path.join(self._tmp, "tk.json")
+        bot._arm = lambda j: None
+        bot._TAKEAWAY["on"] = False
+        self.reps = []
+
+        async def fs(cid, msg, tag=""):
+            pass
+        bot._send_safe = fs
+
+        async def sy(text, delay=0):
+            pass
+        bot._say = sy
+
+        async def own(u):
+            return True
+        bot._ensure_owner = own
+        reps = self.reps
+
+        class _Msg:
+            text = "每日1100 外賣\n每日1400 外賣結束"
+
+            async def reply_text(self, s, **k):
+                reps.append(s)
+
+        class _Chat:
+            id = 2
+        self.upd = type("U", (), {"message": _Msg(), "effective_chat": _Chat()})()
+
+    def tearDown(self):
+        bot.JOBS_PATH, bot.TAKEAWAY_PATH = self._oj, self._otp
+        bot._TASKS, bot._arm = self._ot, self._oarm
+        bot._TAKEAWAY.clear()
+        bot._TAKEAWAY.update(self._otk)
+        bot._ensure_owner = self._oown
+        bot._say, bot._send_safe = self._osay, self._osend
+
+    def test_two_lines_both_scheduled(self):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._on_message(self.upd, None))
+        finally:
+            loop.close()
+        self.assertEqual(len(self.reps), 1)
+        r = self.reps[0]
+        self.assertNotIn("❓", r)
+        self.assertIn("日日 11:00", r)
+        self.assertIn("日日 14:00", r)
+        jobs = bot._jobs()
+        self.assertEqual([(j["type"], j["daily"], j["chat_id"]) for j in jobs],
+                         [("takeaway_on", True, 2), ("takeaway_off", True, 2)])
 
 
 class TestPlayCandidates(unittest.TestCase):

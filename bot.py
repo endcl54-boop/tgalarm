@@ -4823,7 +4823,18 @@ async def _on_message(update, context):
         elif p:
             results.append(_execute(p, now, update.effective_chat.id))
         else:
-            results.append(f"❓ 睇唔明：{ln}")
+            # 逐行後備：外賣／財務文法淨係喺成句比對有接（4753/4757），
+            # 多行訊息逐行都要識（2026-10-07 用戶三報個案：兩行一齊 send 全❓）
+            _tk = _takeaway_handle(ln, update.effective_chat.id)
+            if _tk is not None:
+                results.append(_tk)
+                continue
+            _fdl = _findef_route(ln)
+            if _fdl is not None:
+                _okf, _repf = await asyncio.to_thread(_findef_api, _fdl[0], _fdl[1])
+                results.append(_repf)
+            else:
+                results.append(f"❓ 睇唔明：{ln}")
 
     reply = "\n".join(results)
     if len(items) == 1 and results[0].startswith("❓"):
