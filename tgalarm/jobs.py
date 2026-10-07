@@ -101,7 +101,7 @@ def _fmt_jobs(now: engine.dt.datetime) -> str:
         icon = {"timer": "⏱", "nav": "🧭", "alloc": "🧩", "series": "⏰",
                 "bell": "⏰", "weather": "🌤", "web": "🌐", "nag": "💧",
                 "focus": "🎯", "battery": "🔋", "bthead": "🎧",
-                "takeaway_on": "🛵", "takeaway_off": "🏁",
+                "takeaway_on": "🛵", "takeaway_off": "🏁", "calm": "🧘",
                 "sched_pause": "⏸", "sched_resume": "▶️"}.get(j.get("type"), "🎵")
         if j.get("paused"):
             state = "（⏸已暫停）"
