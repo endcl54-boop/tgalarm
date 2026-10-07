@@ -2500,6 +2500,26 @@ class TestTakeawaySched(unittest.TestCase):
 
 
 
+class TestExpenseSynonyms(unittest.TestCase):
+    """使咗 同義詞：洗左／洗咗／使左（Frankie 實錄「洗左 10.6 地鐵」）。"""
+
+    def test_route_variants(self):
+        cases = {
+            "使咗 50 午餐": ("50", "午餐"),
+            "洗左 10.6 地鐵": ("10.6", "地鐵"),
+            "洗咗 12.5 想要 奶茶": ("12.5", "奶茶"),
+            "使左 8 交通": ("8", "交通"),
+        }
+        for text, (amt, note) in cases.items():
+            r = bot._findef_route(text)
+            self.assertIsNotNone(r, text)
+            op, params = r
+            self.assertEqual(op, "expense")
+            self.assertEqual(params["amt"], amt)
+            self.assertEqual(params["note"], note)
+        self.assertIsNone(bot._findef_route("洗左 地鐵"))  # 冇銀碼唔收
+
+
 class TestMonotonicIds(unittest.TestCase):
     """job ID 唔准 recycled（2026-10-07 用戶令：號碼跳得好犀利——
     one-shot 自清後 max+1 會攞返舊號）。"""

@@ -17,7 +17,9 @@ GAS2_KEY = core.config_get("GAS2_KEY")
 
 def route(t: str):
     """財務防護文法 → (op, params)；唔關事回 None。最短式（用戶令）。"""
-    m = re.fullmatch(r"使咗\s*(\d+(?:\.\d+)?)\s*(想要|需要)?\s*(.*)", t)
+    # 洗左＝口語同義（2026-10-07 用戶實錄「洗左 10.6 地鐵」睇唔明）
+    m = re.fullmatch(
+        r"(?:使咗|使左|洗咗|洗左)\s*(\d+(?:\.\d+)?)\s*(想要|需要)?\s*(.*)", t)
     if m:
         return ("expense", {"amt": m.group(1), "kind": m.group(2),
                             "note": m.group(3).strip()})
