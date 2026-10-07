@@ -1029,8 +1029,8 @@ def _findef_api(op: str, params: dict) -> tuple:
         act = d.get("activity") or {}
         run = act.get("running")
         lines = [f"🛡 財務防護（{w.get('weekStart')}–{w.get('weekEnd')}）",
-                 f"層 {w.get('layer')}/{w.get('layers')}（{w.get('mode')}）："
-                 f"本週 ${w.get('quota')} 額度",
+                 (f"層 {w.get('layer')}/{w.get('layers')}（{w.get('mode')}）："
+                  f"本週 ${w.get('quota')} 額度"),
                  f"用咗 ${w.get('spent')}（{w.get('pct')}%）｜剩 ${w.get('remaining')}"
                  + ("　⚠️ 超咗！" if w.get("over") else "")]
         lines.append(f"活動：{run['activity'] if run else '冇行緊'}"
@@ -4724,7 +4724,7 @@ async def _on_message(update, context):
         return
     _fd = _findef_route(t)
     if _fd is not None:
-        okfd, repfd = await asyncio.to_thread(_findef_api, _fd[0], _fd[1])
+        _okfd, repfd = await asyncio.to_thread(_findef_api, _fd[0], _fd[1])
         await update.message.reply_text(repfd)
         return
     _cd = _countdown_handle(t, _cid0)
