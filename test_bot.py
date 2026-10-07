@@ -2500,6 +2500,111 @@ class TestTakeawaySched(unittest.TestCase):
 
 
 
+class TestWebPlay(unittest.TestCase):
+    """網播＝開網頁＋播歌一條 job（2026-10-07 用戶令；拍板：網頁先即刻播）。"""
+
+    def test_parse_three_forms(self):
+        c = bot.parse_player("網播 新聞 loHouse")
+        self.assertEqual((c.action, c.ref, c.extra),
+                         ("webplay", "新聞", "loHouse"))
+        c2 = bot.parse_player("0730 網播 新聞 loHouse")
+        self.assertEqual((c2.action, c2.hour, c2.minute, c2.ref, c2.extra),
+                         ("sched_webplay", 7, 30, "新聞", "loHouse"))
+        c3 = bot.parse_player("每日 0730 網播 新聞 loHouse")
+        self.assertEqual(c3.action, "sched_webplay_daily")
+
+    def test_sched_creates_one_job(self):
+        old = bot._add_job
+        holder = {}
+
+        def fake_add(cmd, chat_id, now, url="", seconds=0, mode="d",
+                     label="", pl=""):
+            holder["cmd"] = cmd
+            holder["url"] = url
+            holder["pl"] = pl
+            holder["label"] = label
+            return ({"id": 88, "next_dt": now}, [])
+        bot._add_job = fake_add
+        try:
+            r = bot._execute_player(
+                bot.PlayerCmd("sched_webplay", ref="新聞", extra="loHouse",
+                              hour=7, minute=30), 1,
+                bot.dt.datetime.now())
+        finally:
+            bot._add_job = old
+        self.assertIn("已排程", r)
+        self.assertIn("網播", r)
+        self.assertEqual(holder["cmd"].action, "sched_webplay")
+        self.assertEqual(holder["pl"], "pl-url")
+        self.assertIn("＋", holder["label"])
+
+    def setUp(self):
+        self._o = (bot._web_target, bot._resolve_playlist)
+        bot._web_target = lambda ref: ("https://news.example", None)
+        bot._resolve_playlist = lambda ref: ("pl-url", "loHouse") if ref else (
+            None, "err")
+
+    def tearDown(self):
+        bot._web_target, bot._resolve_playlist = self._o
+
+    def test_immediate_web_then_play(self):
+        calls = []
+        old_run, old_play = bot.run_intent, bot._play
+
+        def frun(cmd, t=0):
+            calls.append(("web", cmd[4] if len(cmd) > 4 else cmd))
+            return True, ""
+        bot.run_intent = frun
+
+        def fplay(url, sh=False):
+            calls.append(("play", url))
+            return True, ""
+        bot._play = fplay
+        try:
+            r = bot._execute_player(
+                bot.PlayerCmd("webplay", ref="新聞", extra="loHouse"), 1,
+                bot.dt.datetime.now())
+        finally:
+            bot.run_intent, bot._play = old_run, old_play
+        self.assertEqual([c[0] for c in calls], ["web", "play"])  # 網頁先
+        self.assertEqual(calls[1][1], "pl-url")
+        self.assertIn("🌐", r)
+        self.assertIn("▶️", r)
+
+    def test_fire_webplay(self):
+        import asyncio as _a
+        calls = []
+        old_run, old_play = bot.run_intent, bot._play
+
+        def frun(cmd, t=0):
+            calls.append("web")
+            return True, ""
+        bot.run_intent = frun
+
+        def fplay(url, sh=False):
+            calls.append(("play", url))
+            return True, ""
+        bot._play = fplay
+        sent = []
+
+        async def fs(cid, msg, tag=""):
+            sent.append(msg)
+        osend = bot._send_safe
+        bot._send_safe = fs
+        job = {"id": 777, "type": "webplay", "chat_id": 1, "hh": 7,
+               "mm": 30, "url": "https://news.example",
+               "playlist": "pl-url", "label": "新聞＋loHouse", "daily": False}
+        loop = _a.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(dict(job), 0))
+        finally:
+            loop.close()
+            bot.run_intent, bot._play, bot._send_safe = old_run, old_play, osend
+        self.assertEqual(calls[0], "web")
+        self.assertEqual(calls[1], ("play", "pl-url"))
+        self.assertIn("網播", sent[-1])
+
+
 class TestMultiLineTakeaway(unittest.TestCase):
     """多行訊息逐行都識外賣文法（2026-10-07 用戶三報：兩行一齊 send 全❓——
     外賣文法淨喺成句比對有接，逐行批次層冇接）。"""

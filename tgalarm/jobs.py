@@ -30,6 +30,8 @@ def _fmt_job_content(j: dict) -> str:
     fmt = core.JOB_FORMATTERS.get(j.get("type", ""))
     if fmt:                     # S13 收口：註冊表優先（takeaway 等）
         return fmt(j)
+    if j.get("type") == "webplay":
+        return f"網播 {j.get('label', '')}"
     if j.get("type", "play") == "timer":
         tag = f"（{j['label']}）" if j.get("label") else ""
         return f"計時 {engine.fmt_duration(j.get('seconds', 0))}{tag}"
@@ -107,18 +109,22 @@ def _fmt_jobs(now: engine.dt.datetime) -> str:
 
 
 def _add_job(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime,
-             url: str = "", seconds: int = 0, mode: str = "d", label: str = "") -> tuple:
+             url: str = "", seconds: int = 0, mode: str = "d", label: str = "",
+             pl: str = "") -> tuple:
     """新增排程；同類型同時間嘅舊排程會被取代。回傳 (job, 被取代嘅 id 列表)。"""
     is_timer = cmd.action in ("sched_timer", "sched_timer_daily")
     is_nav = cmd.action in ("sched_nav", "sched_nav_daily")
     is_web = cmd.action in ("sched_web", "sched_web_daily")
+    is_webplay = cmd.action in ("sched_webplay", "sched_webplay_daily")
     is_series = cmd.action in ("series", "series_daily")
     is_alarm = cmd.action == "sched_alarm_daily"
     jtype = ("series" if is_series
              else ("timer" if is_timer
                    else ("nav" if is_nav
                          else ("web" if is_web
-                               else ("bell" if is_alarm else "play")))))
+                               else ("bell" if is_alarm
+                                     else ("webplay" if is_webplay
+                                           else "play"))))))
     jobs = engine._jobs()
     # 去重：同類型 + 同 hh:mm  collide → 取代舊嘅
     replaced = [j["id"] for j in jobs
@@ -142,8 +148,9 @@ def _add_job(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime,
     job = {"id": jid, "type": jtype, "hh": cmd.hour, "mm": cmd.minute,
            "daily": cmd.action in ("sched_daily", "sched_timer_daily",
                                    "sched_nav_daily", "sched_web_daily",
+                                   "sched_webplay_daily",
                                    "series_daily", "sched_alarm_daily"),
-           "url": url, "seconds": seconds, "mode": mode,
+           "url": url, "playlist": pl, "seconds": seconds, "mode": mode,
            "label": label or cmd.ref or default_label,
            "chat_id": chat_id, "next": first.isoformat(),
            "shuffle": cmd.shuffle, "vol": cmd.vol, "paused": False}

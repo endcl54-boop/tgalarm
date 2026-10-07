@@ -106,3 +106,35 @@ verbatim 切塊連註釋全保。
 （dt/json/re…）係 engine 命名空間成員，域內要行 engine.X，唔可以本地 import
 ⑦module 層（import 期）同檔名保持本地綁定（init 順序＝原語義，_YT_PKG 案）
 ⑧engine import 塊=F401 noqa 契約（域檔經 engine.shutil 等引用）。
+
+---
+
+## ✅✅ 十三步全勾（2026-10-07 15:4x，commit ceb740d；381 綠×2＋ruff 0）
+
+用戶令「一次過完成呢十三份步驟，跟藍圖」。核對發現 S13 條尾（registry 零消費者）未收——本輪補齊：
+
+| 步 | 內容 | 狀態 |
+|---|---|---|
+| S1 | core 基建＋registry＋守門＋zipapp | ✅（20fbda8） |
+| S2 | finance | ✅（S1 試刀＋真機層數） |
+| S3 | takeaway | ✅（真拆歸位＋**本輪 fire 註冊化**） |
+| S4 | weather＋web | ✅（205/39 行） |
+| S5 | fun | ✅（257＋liar.py 入 pyz） |
+| S6 | nav | ✅（313） |
+| S7 | todo/alloc | ✅（429） |
+| S8 | guards | ✅（276） |
+| S9 | patrol | ✅（340） |
+| S10 | alarms | ✅（188） |
+| S11 | schedule/jobs | ✅（367＋_fmt_job_content 註冊表優先） |
+| S12 | player | ✅（257＋種子快取＋force-stop） |
+| S13 | app.py＋_fire_later 縮細＋bot.py 薄殼化 | ✅（本輪：takeaway fire 本體 sched→takeaway.py，FIRE_HANDLERS/JOB_FORMATTERS 首批消費者上線＋arch TestStranglerSeam 3 條） |
+
+**本輪手術**：takeaway.py 加 `_fire`（sched if 鏈逐字遷入）＋`_fmt_on/_fmt_off`，經
+`from .core import register_fire, register_formatter` 直連註冊（免 engine import 期
+次序——isort 會排 `.core` 喺 `.` 後面，教訓＋1）；sched._fire_later 註冊表優先派發
+（未註冊型別照行舊鏈＝fallback 安全網）；jobs._fmt_job_content 同制。
+engine 加 `from .core import FIRE_HANDLERS, JOB_FORMATTERS` 別名（same dict object，
+bot.X 測試路徑用）。
+
+**真機**：bot.pyz 4741454d 上機；SEAM_PROBE_OK（registry 消費者 live）；PID 12611。
+**判準 6/6＋十三步 13/13——專案收官。**

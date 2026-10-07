@@ -102,6 +102,37 @@ def _execute_player(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime
         msg = (f"🗓 已排程（{kind} #{job['id']}）：{when} "
                f"導航去「{job['label']}」（{engine._mode_label(mode)}）")
         return msg + engine._replaced_note(replaced)
+    if a == "webplay":
+        # 網播：開網頁→即刻播歌（2026-10-07 用戶令；一條指令兩動作）
+        wurl, werr = engine._web_target(cmd.ref)
+        if not wurl:
+            return werr
+        plurl, plerr = engine._resolve_playlist(cmd.extra)
+        if not plurl:
+            return plerr
+        if not engine.DRY_RUN:
+            engine._shell_priv_exec("input keyevent KEYCODE_WAKEUP")
+        okw, infow = engine.run_intent(engine.web_intent_cmd(wurl))
+        okp, outp = engine._play(plurl, cmd.shuffle)
+        wnote = "" if okw else f"\n⚠️ 網頁開唔到：{infow[:80]}"
+        if okp:
+            return f"🌐 開網頁「{cmd.ref}」＋▶️ 播「{cmd.extra}」{wnote}"
+        return f"🌐 網頁開咗，但❌ 播唔到：{outp[:120]}" + wnote
+    if a in ("sched_webplay", "sched_webplay_daily"):
+        wurl, werr = engine._web_target(cmd.ref)
+        if not wurl:
+            return werr
+        plurl, plerr = engine._resolve_playlist(cmd.extra)
+        if not plurl:
+            return plerr
+        label = f"{cmd.ref}＋{cmd.extra}"
+        job, replaced = engine._add_job(cmd, chat_id, now, url=wurl,
+                                        label=label, pl=plurl)
+        kind = "每日" if a == "sched_webplay_daily" else "一次"
+        when = f"{engine.day_label(job['next_dt'], now)} {cmd.hour:02d}:{cmd.minute:02d}"
+        msg = (f"🗓 已排程（{kind} #{job['id']}）：{when} 網播"
+               f"「{cmd.ref}＋{cmd.extra}」＝開網頁→即刻播歌")
+        return msg + engine._replaced_note(replaced)
     if a in ("sched_web", "sched_web_daily"):
         url, err = engine._web_target(cmd.ref)
         if not url:

@@ -412,6 +412,17 @@ async def _fire_later(job: dict, delay: float) -> None:
         engine._TASKS.pop(job["id"], None)
         engine._arm(job)
         return
+    elif jtype == "webplay":    # 網播：開網頁→即刻播歌（2026-10-07 用戶令）
+        if not engine.DRY_RUN:
+            engine._shell_priv_exec("input keyevent KEYCODE_WAKEUP")
+        okw, _infow = engine.run_intent(
+            engine.web_intent_cmd(job.get("url", "")))
+        if job.get("vol") is not None:
+            await engine.asyncio.to_thread(engine._set_media_volume,
+                                           job["vol"])
+        ok, info = engine._play(job.get("playlist", ""),
+                                job.get("shuffle", False))
+        how = f"網播「{job.get('label')}」" + ("" if okw else "（網頁開唔到）")
     elif jtype == "web":
         if not engine.DRY_RUN:
             engine._shell_priv_exec("input keyevent KEYCODE_WAKEUP")  # 著螢幕
