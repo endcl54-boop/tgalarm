@@ -2533,6 +2533,97 @@ class TestPlaylistDiskCache(unittest.TestCase):
                          ["c" * 11])
 
 
+class TestFinDef(unittest.TestCase):
+    """財務防護 GAS app 整合：文法路由＋JSON 門格式化（2026-10-07）。"""
+
+    def setUp(self):
+        self._ourl, self._okey = bot.GAS2_URL, bot.GAS2_KEY
+        bot.GAS2_URL, bot.GAS2_KEY = "https://gas.test/exec", "K1"
+        import urllib.request
+        self._ourlopen = urllib.request.urlopen
+
+    def tearDown(self):
+        bot.GAS2_URL, bot.GAS2_KEY = self._ourl, self._okey
+        import urllib.request
+        urllib.request.urlopen = self._ourlopen
+
+    def test_route(self):
+        self.assertEqual(bot._findef_route("層數"), ("status", {}))
+        self.assertEqual(bot._findef_route("狀態"), ("status", {}))
+        self.assertEqual(bot._findef_route("活動"),
+                         ("status", {}))
+        self.assertEqual(bot._findef_route("活動 落樓行 10 分鐘"),
+                         ("start", {"name": "落樓行 10 分鐘"}))
+        self.assertEqual(bot._findef_route("活動完"), ("stop", {}))
+        self.assertEqual(bot._findef_route("提議"), ("pick", {}))
+        self.assertEqual(bot._findef_route("使咗 50 午餐"),
+                         ("expense", {"amt": "50", "kind": None,
+                                      "note": "午餐"}))
+        self.assertEqual(bot._findef_route("使咗 30.5 想要 奶茶"),
+                         ("expense", {"amt": "30.5", "kind": "想要",
+                                      "note": "奶茶"}))
+        for x in ("使咗", "使咗 abc", "開 X"):
+            self.assertIsNone(bot._findef_route(x), x)
+
+    def _mock(self, payload):
+        import urllib.request
+
+        class R:
+            def read(self_):
+                return json.dumps(payload).encode()
+
+            def __enter__(self_):
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+        urllib.request.urlopen = lambda req, timeout=25: R()
+
+    def test_api_status_and_more(self):
+        self._mock({"ok": True, "week": {
+            "weekStart": "2026-10-05", "weekEnd": "2026-10-11",
+            "mode": "pyramid", "layer": 1, "layers": 5, "quota": 266.67,
+            "spent": 0, "pct": 0, "remaining": 266.67, "over": False},
+            "activity": {"running": None, "todayMinutes": 0}})
+        ok, txt = bot._findef_api("status", {})
+        self.assertTrue(ok)
+        self.assertIn("層 1/5（pyramid）", txt)
+        self.assertIn("剩 $266.67", txt)
+        self.assertIn("冇行緊", txt)
+        # start／stop／pick／expense
+        self._mock({"ok": True, "message": "▶️ 開始：落樓行"})
+        self.assertEqual(bot._findef_api("start", {"name": "落樓行"})[1],
+                         "▶️ 開始：落樓行")
+        self._mock({"ok": True, "message": "⏹️ 落樓行：10 分鐘"})
+        self.assertIn("10 分鐘", bot._findef_api("stop", {})[1])
+        self._mock({"ok": True, "pick": {"level": "🔥",
+                                         "activity": "煮一餐新嘢"}})
+        self.assertIn("煮一餐新嘢", bot._findef_api("pick", {})[1])
+        self._mock({"ok": True, "message": "💰 已記 $50",
+                    "status": {"remaining": 216.67}})
+        ok, txt = bot._findef_api("expense", {"amt": "50", "note": "午餐"})
+        self.assertIn("已記 $50", txt)
+        self.assertIn("剩 $216.67", txt)
+
+    def test_api_errors(self):
+        self._mock({"ok": False, "message": "key 唔對"})
+        ok, txt = bot._findef_api("status", {})
+        self.assertFalse(ok)
+        self.assertIn("key 唔對", txt)
+        import urllib.request
+
+        def boom(req, timeout=25):
+            raise OSError("斷網")
+        urllib.request.urlopen = boom
+        ok2, txt2 = bot._findef_api("status", {})
+        self.assertFalse(ok2)
+        self.assertIn("攞唔到", txt2)
+        bot.GAS2_URL = ""
+        ok3, txt3 = bot._findef_api("status", {})
+        self.assertFalse(ok3)
+        self.assertIn("GAS2_URL", txt3)
+
+
 class TestPlaylistCache(unittest.TestCase):
     """_playlist_videos session 快取：第二次起唔出網（最快響應）。"""
 

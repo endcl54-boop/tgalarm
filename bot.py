@@ -99,6 +99,10 @@ def _read_config_file() -> dict:
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or _read_config_file().get("BOT_TOKEN", "").strip()
 GAS_URL = os.environ.get("GAS_URL", "").strip() or _read_config_file().get("GAS_URL", "").strip()
+GAS2_URL = (os.environ.get("GAS2_URL", "").strip()
+            or _read_config_file().get("GAS2_URL", "").strip())
+GAS2_KEY = (os.environ.get("GAS2_KEY", "").strip()
+            or _read_config_file().get("GAS2_KEY", "").strip())
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY", "").strip()
                   or _read_config_file().get("GEMINI_API_KEY", "").strip())
 PATROL_ROOT = (os.environ.get("PATROL_ROOT", "").strip()
@@ -174,7 +178,8 @@ HELP = (
     "・地點 公司 沙田石門安群街1號（儲地點）　・導航 公司 [步行]（預設巴士）\n"
     "・0830 導航 公司　・每日 0800 導航 公司　・地點（清單）・刪地點 公司\n"
     "🌐 網頁：・網頁 新聞 https://…（儲）・開網頁 新聞　・0830 開網頁 新聞・每日 0900 開網頁 新聞\n"
-    "🔒 封印（衝動防線）：封印 za 到 2026-10-15（停用，點入開唔到）・封印到1001（續封上次）・解封 [名]\n📋 待辦（自動置頂，撳按鈕打勾）：\n"
+    "🔒 封印（衝動防線）：封印 za 到 2026-10-15（停用，點入開唔到）・封印到1001（續封上次）・解封 [名]\n"
+    "🛡 財務防護：層數（本週配額）・活動 X（開始）・活動完・提議（抗無聊）・使咗 50 午餐（記開銷，可加 想要）\n📋 待辦（自動置頂，撳按鈕打勾）：\n"
     "・待辦 牛奶、交電費（加項目）　・待辦（睇清單）\n"
     "・完成 2　・未做 2　・刪 2　・清除已完成\n"
     "🧩 時間分配（到點自動連環計時）：\n"
@@ -982,6 +987,62 @@ def _takeaway_handle(t: str, chat_id: int = 0):
         _takeaway_set(False)
         return "✅ 外賣模式收工——計時還原，唔再提早響。"
     return None
+
+
+# ---- 財務防護 GAS app（2026-10-07 整合：查層數／活動／記開銷）----
+def _findef_route(t: str):
+    """財務防護文法 → (op, params)；唔關事回 None。最短式（用戶令）。"""
+    m = re.fullmatch(r"使咗\s*(\d+(?:\.\d+)?)\s*(想要|需要)?\s*(.*)", t)
+    if m:
+        return ("expense", {"amt": m.group(1), "kind": m.group(2),
+                            "note": m.group(3).strip()})
+    if t in ("層數", "狀態", "防護", "活動"):
+        return ("status", {})
+    if t == "提議":
+        return ("pick", {})
+    if t in ("活動完", "停活動"):
+        return ("stop", {})
+    m = re.fullmatch(r"活動\s+(.+)", t)
+    if m:
+        return ("start", {"name": m.group(1).strip()})
+    return None
+
+
+def _findef_api(op: str, params: dict) -> tuple:
+    """叫財務防護 app 嘅 JSON 門（?op=&key=）。回 (ok, TG 文字)。"""
+    import urllib.parse
+    import urllib.request
+    if not GAS2_URL:
+        return False, "未設定 GAS2_URL（~/.tgalarm/config 加 GAS2_URL=<財務防護 /exec URL>）"
+    q = {"op": op, "key": GAS2_KEY}
+    q.update({k: v for k, v in params.items() if v})
+    url = GAS2_URL + ("&" if "?" in GAS2_URL else "?") + urllib.parse.urlencode(q)
+    try:
+        with urllib.request.urlopen(url, timeout=25) as r:
+            d = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        return False, f"❌ 財務防護攞唔到：{str(e)[:120]}"
+    if not d.get("ok"):
+        return False, f"❌ {d.get('message', '唔知咩事')}"
+    if op == "status":
+        w = d.get("week") or {}
+        act = d.get("activity") or {}
+        run = act.get("running")
+        lines = [f"🛡 財務防護（{w.get('weekStart')}–{w.get('weekEnd')}）",
+                 f"層 {w.get('layer')}/{w.get('layers')}（{w.get('mode')}）："
+                 f"本週 ${w.get('quota')} 額度",
+                 f"用咗 ${w.get('spent')}（{w.get('pct')}%）｜剩 ${w.get('remaining')}"
+                 + ("　⚠️ 超咗！" if w.get("over") else "")]
+        lines.append(f"活動：{run['activity'] if run else '冇行緊'}"
+                     f"｜今日 {act.get('todayMinutes', 0)} 分鐘")
+        return True, "\n".join(lines)
+    if op == "pick":
+        p = d.get("pick") or {}
+        return True, f"🎲 提議（{p.get('level', '')}）：{p.get('activity', '?')}"
+    msg = d.get("message") or "✅ 搞掂"
+    if op == "expense" and isinstance(d.get("status"), dict):
+        msg += f"｜本週剩 ${d['status'].get('remaining')}"
+    return True, msg
 
 
 # ---- 電量（termux-battery-status 優先，sysfs 後備）----
@@ -4660,6 +4721,11 @@ async def _on_message(update, context):
     _tw = _takeaway_handle(t, _cid0)
     if _tw is not None:
         await update.message.reply_text(_tw)
+        return
+    _fd = _findef_route(t)
+    if _fd is not None:
+        okfd, repfd = await asyncio.to_thread(_findef_api, _fd[0], _fd[1])
+        await update.message.reply_text(repfd)
         return
     _cd = _countdown_handle(t, _cid0)
     if _cd is not None:
