@@ -1,5 +1,11 @@
 # tgalarm 維運手冊（2026-10-07 用戶令：根治時間黑洞——持久化版）
 
+## 🚨 第零規矩（用戶三次震怒後落死——優先過晒下面所有嘢）
+
+1. **repo 檔案一律絕對路徑**：`/home/user/telegram-alarm-bot/bot.pyz`——永遠唔准裸寫 `bot.pyz`／`tgalarm/...`。
+2. **部署/probe 淨准行 `./deploy.sh`**——手打任何 `md5sum bot.pyz && ssh ...` 呢類部署鏈＝違規。
+3. **一個 bash call 一個目的**：唔准將 md5/git/pack/scp 砌埋一條十步 && 鏈——長鏈就係錯 cwd 事故溫床。
+
 ## 每輪紀律（硬規矩）
 
 1. **開場第一 call＝`./self_check.sh`**——偵測到即救（HEAD/identity/key/core/ruff/ssh）。
