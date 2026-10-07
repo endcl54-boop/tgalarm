@@ -60,6 +60,16 @@ from dataclasses import dataclass
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
 log = logging.getLogger("tgalarm")
 
+# S1 模組化（docs/modularization-plan.md）：tgalarm 套件——開發態行 repo 目錄，
+# 部署態同目錄 bot.pyz（zipimport）；最終 S13 bot.py 收縮成呢個 shim 本體。
+try:
+    from tgalarm import finance as _finance_mod
+except ImportError:
+    _pyz = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.pyz")
+    if os.path.exists(_pyz):
+        sys.path.insert(0, _pyz)
+    from tgalarm import finance as _finance_mod
+
 # ---------------- 設定（環境變數 > 設定檔） ----------------
 CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/config"))
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
@@ -98,10 +108,6 @@ def _read_config_file() -> dict:
 
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip() or _read_config_file().get("BOT_TOKEN", "").strip()
-GAS2_URL = (os.environ.get("GAS2_URL", "").strip()
-            or _read_config_file().get("GAS2_URL", "").strip())
-GAS2_KEY = (os.environ.get("GAS2_KEY", "").strip()
-            or _read_config_file().get("GAS2_KEY", "").strip())
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY", "").strip()
                   or _read_config_file().get("GEMINI_API_KEY", "").strip())
 PATROL_ROOT = (os.environ.get("PATROL_ROOT", "").strip()
@@ -1002,64 +1008,12 @@ def _takeaway_handle(t: str, chat_id: int = 0):
 
 # ---- 財務防護 GAS app（2026-10-07 整合：查層數／活動／記開銷）----
 def _findef_route(t: str):
-    """財務防護文法 → (op, params)；唔關事回 None。最短式（用戶令）。"""
-    m = re.fullmatch(r"使咗\s*(\d+(?:\.\d+)?)\s*(想要|需要)?\s*(.*)", t)
-    if m:
-        return ("expense", {"amt": m.group(1), "kind": m.group(2),
-                            "note": m.group(3).strip()})
-    if t in ("層數", "狀態", "防護", "活動"):
-        return ("status", {})
-    if t == "提議":
-        return ("pick", {})
-    m = re.fullmatch(r"(?:活動完|停活動)\s*(\d+(?:\.\d+)?)?", t)
-    if m:
-        # 活動完 3＝按口供補時埋單（2026-10-07 個案：行緊嗰陣顯示 0）
-        if m.group(1):
-            return ("stop", {"mins": m.group(1)})
-        return ("stop", {})
-    m = re.fullmatch(r"活動\s+(.+)", t)
-    if m:
-        return ("start", {"name": m.group(1).strip()})
-    return None
+    """財務防護文法（S1 起本體喺 tgalarm.finance；呢度係相容 shim）。"""
+    return _finance_mod.route(t)
 
 
 def _findef_api(op: str, params: dict) -> tuple:
-    """叫財務防護 app 嘅 JSON 門（?op=&key=）。回 (ok, TG 文字)。"""
-    import urllib.parse
-    import urllib.request
-    if not GAS2_URL:
-        return False, "未設定 GAS2_URL（~/.tgalarm/config 加 GAS2_URL=<財務防護 /exec URL>）"
-    q = {"op": op, "key": GAS2_KEY}
-    q.update({k: v for k, v in params.items() if v})
-    url = GAS2_URL + ("&" if "?" in GAS2_URL else "?") + urllib.parse.urlencode(q)
-    try:
-        with urllib.request.urlopen(url, timeout=25) as r:
-            d = json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        return False, f"❌ 財務防護攞唔到：{str(e)[:120]}"
-    if not d.get("ok"):
-        return False, f"❌ {d.get('message', '唔知咩事')}"
-    if op == "status":
-        w = d.get("week") or {}
-        act = d.get("activity") or {}
-        run = act.get("running")
-        lines = [f"🛡 財務防護（{w.get('weekStart')}–{w.get('weekEnd')}）",
-                 (f"層 {w.get('layer')}/{w.get('layers')}（{w.get('mode')}）："
-                  f"本週 ${w.get('quota')} 額度"),
-                 f"用咗 ${w.get('spent')}（{w.get('pct')}%）｜剩 ${w.get('remaining')}"
-                 + ("　⚠️ 超咗！" if w.get("over") else "")]
-        lines.append(f"活動：{run['activity'] if run else '冇行緊'}"
-                     f"｜今日 {act.get('todayMinutes', 0)} 分鐘")
-        return True, "\n".join(lines)
-    if op == "stop" and params.get("mins"):
-        op = "stop_min"          # app 端 stop_min.mins＝手動補時埋單
-    if op == "pick":
-        p = d.get("pick") or {}
-        return True, f"🎲 提議（{p.get('level', '')}）：{p.get('activity', '?')}"
-    msg = d.get("message") or "✅ 搞掂"
-    if op == "expense" and isinstance(d.get("status"), dict):
-        msg += f"｜本週剩 ${d['status'].get('remaining')}"
-    return True, msg
+    return _finance_mod.api(op, params)
 
 
 # ---- 電量（termux-battery-status 優先，sysfs 後備）----

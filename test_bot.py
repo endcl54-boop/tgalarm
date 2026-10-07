@@ -2663,13 +2663,16 @@ class TestFinDef(unittest.TestCase):
     """財務防護 GAS app 整合：文法路由＋JSON 門格式化（2026-10-07）。"""
 
     def setUp(self):
-        self._ourl, self._okey = bot.GAS2_URL, bot.GAS2_KEY
-        bot.GAS2_URL, bot.GAS2_KEY = "https://gas.test/exec", "K1"
+        self._ourl, self._okey = (bot._finance_mod.GAS2_URL,
+                                  bot._finance_mod.GAS2_KEY)
+        bot._finance_mod.GAS2_URL = "https://gas.test/exec"
+        bot._finance_mod.GAS2_KEY = "K1"
         import urllib.request
         self._ourlopen = urllib.request.urlopen
 
     def tearDown(self):
-        bot.GAS2_URL, bot.GAS2_KEY = self._ourl, self._okey
+        bot._finance_mod.GAS2_URL = self._ourl
+        bot._finance_mod.GAS2_KEY = self._okey
         import urllib.request
         urllib.request.urlopen = self._ourlopen
 
@@ -2770,7 +2773,7 @@ class TestFinDef(unittest.TestCase):
         ok2, txt2 = bot._findef_api("status", {})
         self.assertFalse(ok2)
         self.assertIn("攞唔到", txt2)
-        bot.GAS2_URL = ""
+        bot._finance_mod.GAS2_URL = ""
         ok3, txt3 = bot._findef_api("status", {})
         self.assertFalse(ok3)
         self.assertIn("GAS2_URL", txt3)
