@@ -2464,10 +2464,31 @@ class TestPlayCandidates(unittest.TestCase):
     def setUp(self):
         self.old = bot.run_intent
         self.oauto = bot._autoplay_url
+        self.opriv = bot._shell_priv_exec
         bot._autoplay_url = lambda u, sh=False: (u, True)
+        bot._shell_priv_exec = lambda cmd, t=0: (True, "")
 
     def tearDown(self):
         bot.run_intent, bot._autoplay_url = self.old, self.oauto
+        bot._shell_priv_exec = self.opriv
+
+    def test_force_stop_before_open(self):
+        """播前 force-stop 再開（用戶 2026-10-07 指定）：防舊 task 騎劫新 URL。"""
+        seq = []
+
+        def fake_priv(cmd, t=0):
+            seq.append(("stop", cmd.split()[-1]))
+            return True, ""
+
+        def fake_intent(cmd, t=0):
+            seq.append(("start", cmd[-1]))
+            return True, ""
+        bot._shell_priv_exec = fake_priv
+        bot.run_intent = fake_intent
+        ok, _ = bot._play("https://www.youtube.com/watch?v=abc")
+        self.assertTrue(ok)
+        self.assertEqual(seq, [("stop", bot._YT_CANDIDATES[0]),
+                               ("start", bot._YT_CANDIDATES[0])])
 
     def test_live_link_autoplays(self):
         """live 電台短link：免歌單撈 id，直開即播（2026-10-06 用戶轉用）。"""

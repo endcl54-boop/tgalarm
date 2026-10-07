@@ -2608,10 +2608,14 @@ def _set_media_volume(pct: int) -> tuple:
 
 def _play(url: str, shuffle: bool = False) -> tuple:
     """優先直開 YouTube app（穩陣快），失敗先交畀系統揀 app。
+    播前先 force-stop（用戶 2026-10-07 指定）：app 行緊嗰陣 am start 淨係帶前
+    舊 task，新 URL 送唔入去（Morphe YT 實錄）；劏乾淨冷啟動先穩。
     回傳 (成功與否, 訊息)；成功但只開到歌單頁（唔自動播）時訊息 = "NO_AUTOLIST"。"""
     target, auto = _autoplay_url(url, shuffle)
     ok = out = False
     for pkg in _YT_CANDIDATES:
+        # 播前劏乾淨：force-stop→冷啟動（封印同款特權 lane；失敗唔攔播放）
+        _shell_priv_exec(f"am force-stop {pkg}")
         ok, out = run_intent(["am", "start", "-a", "android.intent.action.VIEW",
                               "-d", target, pkg])
         if ok:
