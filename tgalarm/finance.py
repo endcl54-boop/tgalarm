@@ -27,6 +27,9 @@ def route(t: str):
         return ("status", {})
     if t == "提議":
         return ("pick", {})
+    if t in ("刪返", "刪除使費"):
+        # 撤銷最後一筆（GAS op=undo v14 起；2026-10-07 接線——凍結令解除）
+        return ("undo", {})
     m = re.fullmatch(r"(?:活動完|停活動)\s*(\d+(?:\.\d+)?)?", t)
     if m:
         # 活動完 3＝按口供補時埋單（2026-10-07 個案：行緊嗰陣顯示 0）

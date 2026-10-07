@@ -2519,6 +2519,12 @@ class TestExpenseSynonyms(unittest.TestCase):
             self.assertEqual(params["note"], note)
         self.assertIsNone(bot._findef_route("洗左 地鐵"))  # 冇銀碼唔收
 
+    def test_undo_route(self):
+        r = bot._findef_route("刪返")
+        self.assertEqual(r, ("undo", {}))
+        self.assertEqual(bot._findef_route("刪除使費"), ("undo", {}))
+        self.assertIsNone(bot._findef_route("刪返 5"))  # 冇呢個文法
+
 
 class TestMonotonicIds(unittest.TestCase):
     """job ID 唔准 recycled（2026-10-07 用戶令：號碼跳得好犀利——
