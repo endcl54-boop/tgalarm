@@ -46,7 +46,8 @@ class TestArchRules(unittest.TestCase):
                               src, re.MULTILINE)
             bad_abs = [m for m in mods if m.startswith("tgalarm")]
             bad_sib = [m for m in mods
-                       if m.startswith(".") and m not in (".", ".core")]
+                       if m.startswith(".")
+                       and m not in (".", ".core", ".engine")]
             self.assertFalse(bad_abs, f"{fname} 禁絕對 import：{bad_abs}")
             self.assertFalse(bad_sib, f"{fname} 禁兄弟域 import：{bad_sib}")
 
@@ -60,6 +61,20 @@ class TestArchRules(unittest.TestCase):
                            text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("NO_TELEGRAM", r.stdout)
+
+
+class TestLineBudget(unittest.TestCase):
+    """判準 #2：域模組 ≤800 行；engine 中樞（含 re-export 相容層）≤1000。"""
+
+    def test_module_line_budgets(self):
+        tdir = os.path.join(REPO, "tgalarm")
+        for f in os.listdir(tdir):
+            if not f.endswith(".py"):
+                continue
+            n = len(open(os.path.join(tdir, f),
+                         encoding="utf-8").read().splitlines())
+            cap = 1000 if f == "engine.py" else 800
+            self.assertLessEqual(n, cap, f"{f} {n} 行超預算 {cap}")
 
 
 class TestRegistry(unittest.TestCase):
