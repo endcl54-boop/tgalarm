@@ -156,7 +156,7 @@ HELP = (
     "・計時 25分鐘 攞集運（時鐘app響＋到點讀你聽；取消 N 淨刪語音）\n"
     "・計時到 18:30 或 1830（倒數到指定時間）\n"
     "・計時 明天 1830 / 後天 0700 / 0925 1830（連日期都收）\n"
-    "・外賣模式：「外賣」即刻開（hhmm 後數字＝單號）；「外賣結束」收工；「1100 外賣」／「1400 外賣結束」＝排定自動開/收\n"
+    "・外賣模式：「外賣」即刻開（hhmm 後數字＝單號）；「外賣結束」收工；「每日1100 外賣」／「每日1400 外賣結束」＝日日自動開/收（冇每日＝一次）\n"
     "🎯 專注：專注 25（工作/休息循環，系統計時器響）・專注結束\n"
     "💧 提醒 每60分 飲水（每 N 分 TG 提；取消 N 收）　🔋 電量／電量守 20／電量守完\n"
     "🎧 耳機（即查藍牙耳機電量）・耳機守 60（≤60% 提你叉電）・耳機守完\n"
@@ -958,20 +958,33 @@ def _takeaway_handle(t: str, chat_id: int = 0):
     """外賣模式開關（2026-09-27 用戶加）：開咗之後所有計時提早 5 分鐘響，
     直到「外賣結束」。2026-10-06 加排程版：「1100 外賣」／「1400 外賣結束」
     （空格可省）＝排定自動開／收（一次過 job）。回傳回覆文字；None=唔關事。"""
-    m = re.fullmatch(r"(\d{3,4})\s*外賣\s*(結束|收工|收)?", t)
+    m = re.fullmatch(r"(每日|每天|everyday)?\s*(\d{3,4})\s*外賣\s*(結束|收工|收)?",
+                     t, re.IGNORECASE)
     if m:
-        v = m.group(1)
+        daily = bool(m.group(1))
+        v = m.group(2)
         hh, mm = int(v[:-2]), int(v[-2:])
         if hh > 23 or mm > 59:
-            return "❓ 時間要 hhmm。例：1100 外賣／1400 外賣結束"
-        off = bool(m.group(2))
+            return "❓ 時間要 hhmm。例：每日1100 外賣／每日1400 外賣結束"
+        off = bool(m.group(3))
         now = dt.datetime.now()
         nxt = _next_occurrence(now, hh, mm)
+        # 同類型同時間撞 → 取代舊（同 _add_job 去重語義；2026-10-07 用戶令加每日版）
+        jtype = "takeaway_off" if off else "takeaway_on"
+        old = [j["id"] for j in _jobs()
+               if j.get("type") == jtype and j.get("hh") == hh and j.get("mm") == mm]
+        if old:
+            for rid in old:
+                _t = _TASKS.pop(rid, None)
+                if _t:
+                    _t.cancel()
+            _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] not in old])
         job = _add_simple_job(chat_id, {
-            "type": "takeaway_off" if off else "takeaway_on",
+            "type": jtype, "daily": daily,
             "chat_id": chat_id, "hh": hh, "mm": mm,
             "next": nxt.isoformat()})
-        day = "今日" if nxt.date() == now.date() else "聽日"
+        day = ("日日" if daily
+               else ("今日" if nxt.date() == now.date() else "聽日"))
         act = "收外賣模式" if off else "開外賣模式（計時提早 5 分鐘響）"
         return f"{'🏁' if off else '🛵'} 已排定（#{job['id']}）：{day} {hh:02d}:{mm:02d} 自動{act}"
     if t in ("外賣", "外賣開", "叫外賣", "外賣模式"):
@@ -2874,8 +2887,17 @@ async def _fire_later(job: dict, delay: float) -> None:
                else f"🏁 {when} 外賣模式自動收工——計時還原")
         await _send_safe(job["chat_id"], msg, "外賣排程")
         await _say("外賣模式開" if jtype == "takeaway_on" else "外賣模式收工")
-        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
         _TASKS.pop(job["id"], None)
+        if job.get("daily"):            # 每日版：聽日同一時間再開（2026-10-07）
+            job["next"] = _next_occurrence(now, job["hh"], job["mm"]).isoformat()
+            jobs = _jobs()
+            for j in jobs:
+                if j["id"] == job["id"]:
+                    j["next"] = job["next"]
+            _save_json(JOBS_PATH, jobs)
+            _arm(job)
+            return
+        _save_json(JOBS_PATH, [j for j in _jobs() if j["id"] != job["id"]])
         return
     if jtype in ("sched_pause", "sched_resume"):   # 排定日期暫停/繼續（2026-10-04）
         ids = job.get("ids") or []

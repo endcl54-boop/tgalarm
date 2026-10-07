@@ -2396,7 +2396,9 @@ class TestTakeawaySched(unittest.TestCase):
         self._oj, self._ot, self._oarm = bot.JOBS_PATH, dict(bot._TASKS), bot._arm
         self._otk, self._oss = dict(bot._TAKEAWAY), bot._send_safe
         self._osay = bot._say
+        self._otp = bot.TAKEAWAY_PATH
         bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot.TAKEAWAY_PATH = os.path.join(self._tmp, "tk.json")  # 唔好寫真持久檔
         bot._arm = lambda j: None
         bot._TAKEAWAY["on"] = False
         self.sent = []
@@ -2411,7 +2413,8 @@ class TestTakeawaySched(unittest.TestCase):
         bot._say = sy
 
     def tearDown(self):
-        bot.JOBS_PATH, bot._TASKS, bot._arm = self._oj, self._ot, self._oarm
+        bot.JOBS_PATH, bot.TAKEAWAY_PATH = self._oj, self._otp
+        bot._TASKS, bot._arm = self._ot, self._oarm
         bot._TAKEAWAY.clear()
         bot._TAKEAWAY.update(self._otk)
         bot._send_safe, bot._say = self._oss, self._osay
@@ -2456,6 +2459,43 @@ class TestTakeawaySched(unittest.TestCase):
         # 即開即收舊文法照舊
         self.assertIn("開", bot._takeaway_handle("外賣", 1))
         self.assertIn("收工", bot._takeaway_handle("外賣結束", 1))
+
+    def test_daily_prefix(self):
+        """每日1100 外賣／每日1400 外賣結束＝日日自動開收（2026-10-07 用戶令）。"""
+        r = bot._takeaway_handle("每日1100 外賣", 2)
+        self.assertIn("已排定", r)
+        self.assertIn("日日 11:00", r)
+        job = bot._jobs()[0]
+        self.assertTrue(job["daily"])
+        self.assertEqual((job["type"], job["hh"], job["mm"]), ("takeaway_on", 11, 0))
+        r2 = bot._takeaway_handle("每日1400 外賣結束", 2)
+        self.assertIn("日日 14:00", r2)
+        self.assertEqual([j["type"] for j in bot._jobs()],
+                         ["takeaway_on", "takeaway_off"])
+        self.assertTrue(bot._jobs()[1]["daily"])
+        # 冇每日頭＝一次過照舊（daily False）
+        bot._takeaway_handle("1500 外賣", 2)
+        self.assertFalse(bot._jobs()[2]["daily"])
+        # 撞時間同類型 → 取代唔疊（15:00 一次過唔同時間照留）
+        bot._takeaway_handle("每日1100外賣", 2)
+        on_jobs = [j for j in bot._jobs() if j["type"] == "takeaway_on"]
+        self.assertEqual(sorted((j["hh"], j["mm"]) for j in on_jobs),
+                         [(11, 0), (15, 0)])
+        daily_on = [j for j in on_jobs if j["hh"] == 11]
+        self.assertEqual(len(daily_on), 1)
+        self.assertTrue(daily_on[0]["daily"])
+        # daily fire：模式開＋job 留低＋next 去聽日
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(dict(on_jobs[0]), 0))
+        finally:
+            loop.close()
+        self.assertTrue(bot._TAKEAWAY["on"])
+        left = [j for j in bot._jobs() if j["type"] == "takeaway_on"]
+        self.assertEqual(len(left), 1)
+        expect = bot._next_occurrence(bot.dt.datetime.now(), 11, 0)
+        self.assertEqual(left[0]["next"][:16], expect.isoformat()[:16])
+        self.assertIn("外賣模式自動開", self.sent[-1][1])
 
 
 class TestPlayCandidates(unittest.TestCase):
