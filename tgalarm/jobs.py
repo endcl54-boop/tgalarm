@@ -1,7 +1,7 @@
 """jobs：排程倉 CRUD＋列表／暫停／恢復／編輯／下一任務行。"""
 from __future__ import annotations
 
-from . import engine
+from . import core, engine
 
 
 def _add_simple_job(chat_id: int, job: dict) -> dict:
@@ -27,6 +27,9 @@ def _jobs() -> list:
 
 def _fmt_job_content(j: dict) -> str:
     """列表/訊息用嘅排程內容描述。"""
+    fmt = core.JOB_FORMATTERS.get(j.get("type", ""))
+    if fmt:                     # S13 收口：註冊表優先（takeaway 等）
+        return fmt(j)
     if j.get("type", "play") == "timer":
         tag = f"（{j['label']}）" if j.get("label") else ""
         return f"計時 {engine.fmt_duration(j.get('seconds', 0))}{tag}"

@@ -79,3 +79,30 @@
 engine 已喺套件內，S3'–S12' 變成 intra-package 重構：每域由 engine 抽去 `tgalarm/<域>.py`，共享可變狀態（_TASKS/_TAKEAWAY/jobs 倉）經 core registry 收編，測試 patch 點跟遷移改（每域一次小 PR＋真機抽查）。次序照原藍圖（finance ✓ → takeaway → weather/web → fun → nav → todo → guards → patrol → alarms → schedule → player → app.py 接組合根）。**app.py 現為佔位（zipapp main 提示未啟用）**；engine.main() 係真入口。
 
 **教訓（batch 期間沙盒又重置一次）**：working 樹倖存但 `tgalarm/core/`（已蹤路徑）被還原走＋remote 抹走＋HEAD 老返 f550f93。處方行齊：remote 重建→fetch→`reset --mixed origin/main`→core 由 session context 重寫→377 綠自證。
+
+## ✅ S3–S13 真拆完成（2026-10-07，commit 0427543；378 綠×2＋ruff 0）
+用戶令「一次過拆十三份到完成既batch」。**自動分割器** `tools/split_engine.py`：
+AST 範圍分析（bound_names 逐 scope 收綁定名，file_global 唔算 local）＋
+**byte→char** 位置換算 token 拼接（中文行 AST col 係 UTF-8 byte 位）——
+verbatim 切塊連註釋全保。
+
+**最終模組圖（判準 #2 全達標）**：
+| 檔 | 行 | 檔 | 行 |
+|---|---|---|---|
+| engine（中樞 hub） | 946 | jobs | 367 |
+| exec（指令執行器） | 548 | patrol | 340 |
+| sched（排程引擎） | 503 | nav | 313 |
+| todo | 429 | parse／guards／player／fun／app | 287/276/257/257/246 |
+| weather／alarms／android | 205/188/104 | finance／takeaway／web | 76/58/39 |
+
+**不變鐵證**：369 舊測試零改動過閘（bot shim PEP 562 代理→engine；域一律
+`engine.X` 延遲綁定＝patch engine.X 對域內部一樣生效——單一命名空間語義）。
+真機：bot.pyz 268KB，PROBE engine@/takeaway@ 均 bot.pyz 內部載入；PID live。
+
+**分割器教訓（寫過就唔好再犯）**：①切塊起點要包裝飾器行（node.lineno 唔包
+@dataclass）②`global X` 刪行要留 \n（否則全檔錯位）③AST col=UTF-8 byte，
+中文行 splice 要轉 char ④Store 檢查 file_global 要喺 add-locals **之前**
+⑤bound_names 都要濾 file_global（否則 `_LOCK_FH = f` 變 local）⑥stdlib 名
+（dt/json/re…）係 engine 命名空間成員，域內要行 engine.X，唔可以本地 import
+⑦module 層（import 期）同檔名保持本地綁定（init 順序＝原語義，_YT_PKG 案）
+⑧engine import 塊=F401 noqa 契約（域檔經 engine.shutil 等引用）。

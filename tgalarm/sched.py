@@ -2,7 +2,7 @@
 共享狀態全部經 engine.X 延遲綁定（測試 patch engine.X 對呢度生效）。"""
 from __future__ import annotations
 
-from . import engine
+from . import core, engine
 
 
 def _arm(job: dict) -> None:
@@ -40,25 +40,10 @@ async def _fire_later(job: dict, delay: float) -> None:
     now = engine.dt.datetime.now()
     jtype = job.get("type", "play")
     defer_msg = False          # nav 彈窗先行時：訊息喺延遲任務送，唔喺度送
-    if jtype in ("takeaway_on", "takeaway_off"):   # 排定自動開/收外賣（2026-10-06）
-        engine._takeaway_set(jtype == "takeaway_on")
-        when = f"{job['hh']:02d}:{job['mm']:02d}"
-        msg = (f"🛵 {when} 外賣模式自動開——計時提早 5 分鐘響"
-               if jtype == "takeaway_on"
-               else f"🏁 {when} 外賣模式自動收工——計時還原")
-        await engine._send_safe(job["chat_id"], msg, "外賣排程")
-        await engine._say("外賣模式開" if jtype == "takeaway_on" else "外賣模式收工")
-        engine._TASKS.pop(job["id"], None)
-        if job.get("daily"):            # 每日版：聽日同一時間再開（2026-10-07）
-            job["next"] = engine._next_occurrence(now, job["hh"], job["mm"]).isoformat()
-            jobs = engine._jobs()
-            for j in jobs:
-                if j["id"] == job["id"]:
-                    j["next"] = job["next"]
-            engine._save_json(engine.JOBS_PATH, jobs)
-            engine._arm(job)
-            return
-        engine._save_json(engine.JOBS_PATH, [j for j in engine._jobs() if j["id"] != job["id"]])
+    if jtype in core.FIRE_HANDLERS:
+        # S13 收口（藍圖接縫）：已註冊型別經 core 註冊表派發
+        # （takeaway_on/off 本體喺 takeaway.py；未註冊型別照行下面鏈）
+        await core.FIRE_HANDLERS[jtype](job, now)
         return
     if jtype in ("sched_pause", "sched_resume"):   # 排定日期暫停/繼續（2026-10-04）
         ids = job.get("ids") or []

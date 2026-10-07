@@ -747,6 +747,7 @@ async def _say(text: str, delay: float = 0.0) -> None:
     log.warning("TTS 兩次都失敗，放棄：%s", text[:40])
 
 
+# ---- core registry（藍圖接縫：域經 engine.X 存取，單一路徑）----
 # ---- 域模組（verbatim 拆出；呢度 re-export 保持 bot.X 相容）----
 from . import alarms as _alarms_mod
 from . import android as _android_mod
@@ -765,6 +766,10 @@ from . import takeaway as _takeaway_mod
 from . import todo as _todo_mod
 from . import weather as _weather_mod
 from . import web as _web_mod
+from .core import (  # registry 別名（same dict object；bot.X 測試路徑用）
+    FIRE_HANDLERS,
+    JOB_FORMATTERS,
+)
 
 _findef_route = _finance_mod.route
 _findef_api = _finance_mod.api

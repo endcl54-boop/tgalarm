@@ -124,6 +124,64 @@ class TestThinShell(unittest.TestCase):
         self.assertNotIn("import bot", src)   # 循環依賴禁令
 
 
+class TestStranglerSeam(unittest.TestCase):
+    """S13 收口：FIRE_HANDLERS／JOB_FORMATTERS 有真消費者（藍圖接縫）——
+    takeaway 域註冊到點處理器＋內容格式化；sched/jobs 經註冊表派發。"""
+
+    def test_takeaway_registered(self):
+        code = ("import bot; "
+                "assert 'takeaway_on' in bot.FIRE_HANDLERS; "
+                "assert 'takeaway_off' in bot.FIRE_HANDLERS; "
+                "assert bot.JOB_FORMATTERS['takeaway_on']({}) "
+                "== '排定開外賣模式'; "
+                "assert bot.JOB_FORMATTERS['takeaway_off']({}) "
+                "== '排定收外賣模式'; "
+                "assert bot._fmt_job_content({'type': 'takeaway_on'}) "
+                "== '排定開外賣模式'; "
+                "print('SEAM_OK')")
+        r = subprocess.run([PY, "-c", code], cwd=REPO, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("SEAM_OK", r.stdout)
+
+    def test_fire_registry_dispatch(self):
+        """已註冊型別經註冊表派發（唔行舊鏈）。"""
+        code = """
+import asyncio, bot
+seen = []
+
+async def fake(job, now):
+    seen.append(job["id"])
+
+bot.FIRE_HANDLERS["unit_fire_x"] = fake
+job = {"id": 99991, "type": "unit_fire_x", "chat_id": 1, "hh": 1, "mm": 2}
+loop = asyncio.new_event_loop()
+try:
+    loop.run_until_complete(bot._fire_later(job, 0))
+finally:
+    loop.close()
+assert seen == [99991], seen
+del bot.FIRE_HANDLERS["unit_fire_x"]
+print("FIRE_DISPATCH_OK")
+"""
+        r = subprocess.run([PY, "-c", code], cwd=REPO, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("FIRE_DISPATCH_OK", r.stdout)
+
+    def test_chain_fallback_for_unregistered(self):
+        """未註冊型別照行舊鏈（timer 內容照出＝鏈未死）。"""
+        code = ("import bot; "
+                "assert 'timer' not in bot.JOB_FORMATTERS; "
+                "assert '計時' in bot._fmt_job_content("
+                "{'type': 'timer', 'label': 'A', 'seconds': 60}); "
+                "print('FALLBACK_OK')")
+        r = subprocess.run([PY, "-c", code], cwd=REPO, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("FALLBACK_OK", r.stdout)
+
+
 class TestZipapp(unittest.TestCase):
     """打包＋終態排練：得 bot.py＋bot.pyz 嘅目錄都要行到（S13 部署態）。"""
 

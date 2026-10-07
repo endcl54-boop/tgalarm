@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from . import engine
+from .core import register_fire, register_formatter
 
 
 def _takeaway_set(on: bool) -> None:
@@ -56,3 +57,45 @@ def _takeaway_handle(t: str, chat_id: int = 0):
         engine._takeaway_set(False)
         return "✅ 外賣模式收工——計時還原，唔再提早響。"
     return None
+
+
+# ---- 排程到點處理器（S13 收口：FIRE_HANDLERS／JOB_FORMATTERS 第一批消費者）----
+
+async def _fire(job: dict, now) -> None:
+    """takeaway_on/off 到點：模式開收＋TG＋語音；daily 重排／一次性自清。
+    （本體由 sched._fire_later if 鏈遷入；語義逐字保留。）"""
+    on = job.get("type") == "takeaway_on"
+    engine._takeaway_set(on)
+    when = f"{job['hh']:02d}:{job['mm']:02d}"
+    msg = (f"🛵 {when} 外賣模式自動開——計時提早 5 分鐘響"
+           if on
+           else f"🏁 {when} 外賣模式自動收工——計時還原")
+    await engine._send_safe(job["chat_id"], msg, "外賣排程")
+    await engine._say("外賣模式開" if on else "外賣模式收工")
+    engine._TASKS.pop(job["id"], None)
+    if job.get("daily"):            # 每日版：聽日同一時間再開（2026-10-07）
+        job["next"] = engine._next_occurrence(
+            now, job["hh"], job["mm"]).isoformat()
+        jobs = engine._jobs()
+        for j in jobs:
+            if j["id"] == job["id"]:
+                j["next"] = job["next"]
+        engine._save_json(engine.JOBS_PATH, jobs)
+        engine._arm(job)
+        return
+    engine._save_json(engine.JOBS_PATH,
+                      [j for j in engine._jobs() if j["id"] != job["id"]])
+
+
+register_fire("takeaway_on")(_fire)
+register_fire("takeaway_off")(_fire)
+
+
+@register_formatter("takeaway_on")
+def _fmt_on(job: dict) -> str:
+    return "排定開外賣模式"
+
+
+@register_formatter("takeaway_off")
+def _fmt_off(job: dict) -> str:
+    return "排定收外賣模式"
