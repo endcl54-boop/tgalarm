@@ -6,7 +6,15 @@ from . import core, engine
 
 def _add_simple_job(chat_id: int, job: dict) -> dict:
     jobs = engine._jobs()
-    jid = max((j["id"] for j in jobs), default=0) + 1
+    # monotonic ID（2026-10-07 用戶令「號碼跳得好犀利」）：已用 ID 記喺
+    # JOBS_PATH 旁 _ids.json，剷咗嘅 job 號碼都唔會攞返——號碼只會向上升
+    ids_path = engine.JOBS_PATH.replace(".json", "") + "_ids.json"
+    try:
+        hi = int(engine._load_json(ids_path, {"hi": 0})["hi"])
+    except (TypeError, KeyError, ValueError):
+        hi = 0
+    jid = max(hi, max((j["id"] for j in jobs), default=0)) + 1
+    engine._save_json(ids_path, {"hi": jid})
     job["id"] = jid
     job.setdefault("daily", False)
     job.setdefault("seconds", 0)
@@ -135,7 +143,13 @@ def _add_job(cmd: engine.PlayerCmd, chat_id: int, now: engine.dt.datetime,
             t.cancel()
     jobs = [j for j in jobs if j["id"] not in replaced]
 
-    jid = max((j["id"] for j in jobs), default=0) + 1
+    ids_path = engine.JOBS_PATH.replace(".json", "") + "_ids.json"
+    try:
+        hi = int(engine._load_json(ids_path, {"hi": 0})["hi"])
+    except (TypeError, KeyError, ValueError):
+        hi = 0
+    jid = max(hi, max((j["id"] for j in jobs), default=0)) + 1
+    engine._save_json(ids_path, {"hi": jid})
     if is_timer or is_series:
         default_label = ""
     elif is_nav:

@@ -2500,6 +2500,37 @@ class TestTakeawaySched(unittest.TestCase):
 
 
 
+class TestMonotonicIds(unittest.TestCase):
+    """job ID 唔准 recycled（2026-10-07 用戶令：號碼跳得好犀利——
+    one-shot 自清後 max+1 會攞返舊號）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._oarm, self._ot = (bot.JOBS_PATH, bot._arm,
+                                          dict(bot._TASKS))
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        bot._TASKS.clear()
+
+    def tearDown(self):
+        bot.JOBS_PATH, bot._arm, bot._TASKS = (self._oj, self._oarm,
+                                               self._ot)
+
+    def test_id_never_reused_after_remove(self):
+        j1 = bot._add_simple_job(1, {"type": "calm", "hh": 9, "mm": 0})
+        self.assertEqual(j1["id"], 1)
+        bot._remove_job(1)                      # 剷走
+        j2 = bot._add_simple_job(1, {"type": "calm", "hh": 10, "mm": 0})
+        self.assertEqual(j2["id"], 2)           # 唔會攞返 #1
+        bot._remove_job(2)
+        j3 = bot._add_simple_job(1, {"type": "calm", "hh": 11, "mm": 0})
+        self.assertEqual(j3["id"], 3)
+        # 跨 _add_job 同樣 monotonic
+        bot._add_job(bot.PlayerCmd("sched_once", hour=8, minute=0),
+                     1, bot.dt.datetime.now(), url="u", label="x")
+        self.assertEqual(bot._jobs()[-1]["id"], 4)
+
+
 class TestCalm(unittest.TestCase):
     """calm 指令：即刻開 Calm／排程 daily（用戶令：叫 calm 唔叫靜度）。"""
 
