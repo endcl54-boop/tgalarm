@@ -24,7 +24,7 @@ HELP = (
     "🎵 播 YouTube 歌單：\n"
     "・播 [名/連結]　・隨機播 [名]　・停　・2130 播 [名]\n"
     "・音量40% 播 [名]／0700 音量40% 播 [名]＝開播前校好媒體音量（最大聲嘅 %）\n"
-    "・每日 0700 播 [名] 隨機　・每日 0900 計時 25分鐘（計時排程）\n"    "・0730 網播 新聞 loHouse＝開網頁＋播歌一條 job；頭加每日＝日日\n"
+    "・每日 0700 播 [名] 隨機　・每日 0900 計時 25分鐘（計時排程）\n"    "・0730 網播 新聞 loHouse＝開網頁＋播歌一條 job；頭加每日＝日日\n"    "・calm＝即刻開 Calm　・每日2130 calm＝日日叫你＋自動開\n"
     "・歌單 名 連結（儲存）　・歌單/排程（列表）\n"
     "・管理：取消 N・暫停 N・繼續 N・暫停排程＝全部停・繼續排程＝全部恢復・改 N 1830\n"
     "・排定日期：1005 暫停排程 3（10月5日起停 #3）・1012 繼續排程（全部恢復）；號碼可多個/省略\n"
@@ -120,6 +120,10 @@ async def _on_message(update, context):
     if _fd is not None:
         _okfd, repfd = await engine.asyncio.to_thread(engine._findef_api, _fd[0], _fd[1])
         await update.message.reply_text(repfd)
+        return
+    _cm = engine._calm_handle(t, _cid0)
+    if _cm is not None:
+        await update.message.reply_text(_cm)
         return
     _cd = engine._countdown_handle(t, _cid0)
     if _cd is not None:

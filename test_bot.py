@@ -2500,6 +2500,71 @@ class TestTakeawaySched(unittest.TestCase):
 
 
 
+class TestCalm(unittest.TestCase):
+    """calm 指令：即刻開 Calm／排程 daily（用戶令：叫 calm 唔叫靜度）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oj, self._ot, self._oarm = bot.JOBS_PATH, dict(bot._TASKS), bot._arm
+        self._odry, self._opriv = bot.DRY_RUN, bot._shell_priv_exec
+        self._osend, self._osay = bot._send_safe, bot._say
+        bot.JOBS_PATH = os.path.join(self._tmp, "j.json")
+        bot._arm = lambda j: None
+        bot.DRY_RUN = True
+        bot._shell_priv_exec = lambda cmd, t=0: (True, "")
+        self.sent, self.said = [], []
+
+        async def fs(cid, msg, tag=""):
+            self.sent.append(msg)
+        bot._send_safe = fs
+
+        async def sy(text, delay=0):
+            self.said.append(text)
+        bot._say = sy
+
+    def tearDown(self):
+        bot.JOBS_PATH, bot.DRY_RUN = self._oj, self._odry
+        bot._TASKS, bot._arm = self._ot, self._oarm
+        bot._shell_priv_exec = self._opriv
+        bot._send_safe, bot._say = self._osend, self._osay
+
+    def test_immediate_and_sched(self):
+        r = bot._calm_handle("calm", 1)
+        self.assertIn("開咗 Calm", r)
+        self.assertIsNone(bot._calm_handle("唔關事", 1))
+        r2 = bot._calm_handle("每日2130 calm", 1)
+        self.assertIn("已排定", r2)
+        self.assertIn("日日 21:30", r2)
+        job = bot._jobs()[0]
+        self.assertEqual((job["type"], job["daily"], job["hh"], job["mm"]),
+                         ("calm", True, 21, 30))
+        # 同時間撞 → 取代
+        bot._calm_handle("2130 calm", 1)
+        calm_jobs = [j for j in bot._jobs() if j["type"] == "calm"]
+        self.assertEqual(len(calm_jobs), 1)
+        self.assertFalse(calm_jobs[0]["daily"])
+        # 壞時間
+        self.assertIn("❓", bot._calm_handle("每日2661 calm", 1))
+
+    def test_fire_via_registry(self):
+        bot._calm_handle("2230 calm", 2)
+        job = dict(bot._jobs()[0])
+        self.assertIn("calm", bot.FIRE_HANDLERS)
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot._fire_later(job, 0))
+        finally:
+            loop.close()
+        self.assertIn("calm 時間", self.sent[-1])
+        self.assertEqual(self.said[-1], "calm 時間，開咗 Calm 俾你")
+        # 一次性 fire 後自清
+        self.assertEqual([j for j in bot._jobs() if j["type"] == "calm"], [])
+
+    def test_formatter(self):
+        self.assertIn("calm", bot._fmt_job_content(
+            {"type": "calm", "hh": 21, "mm": 30}))
+
+
 class TestWebPlay(unittest.TestCase):
     """網播＝開網頁＋播歌一條 job（2026-10-07 用戶令；拍板：網頁先即刻播）。"""
 

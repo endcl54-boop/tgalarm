@@ -752,6 +752,7 @@ async def _say(text: str, delay: float = 0.0) -> None:
 from . import alarms as _alarms_mod
 from . import android as _android_mod
 from . import app as _app_mod
+from . import calm as _calm_mod
 from . import exec as _exec_mod
 from . import finance as _finance_mod
 from . import fun as _fun_mod
@@ -771,6 +772,7 @@ from .core import (  # registry 別名（same dict object；bot.X 測試路徑�
     JOB_FORMATTERS,
 )
 
+_calm_handle = _calm_mod.handle
 _findef_route = _finance_mod.route
 _findef_api = _finance_mod.api
 
