@@ -2531,6 +2531,80 @@ class TestMonotonicIds(unittest.TestCase):
         self.assertEqual(bot._jobs()[-1]["id"], 4)
 
 
+class TestQuiet(unittest.TestCase):
+    """靜音時段：每日時段暫停語音（拍板：TTS 全靜＋TG 照出）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+        self._oq, self._ock, self._osub = (bot.QUIET_PATH, bot._QUIET_CHECK,
+                                           bot.subprocess)
+        bot.QUIET_PATH = os.path.join(self._tmp, "q.json")
+
+    def tearDown(self):
+        bot.QUIET_PATH, bot._QUIET_CHECK, bot.subprocess = (
+            self._oq, self._ock, self._osub)
+
+    def test_grammar_cycle(self):
+        r = bot._quiet_handle("靜音 2300 0730")
+        self.assertIn("🔇", r)
+        self.assertIn("2300–0730", r)
+        self.assertIn("過午夜", r)
+        r0 = bot._quiet_handle("靜音")
+        self.assertIn("2300–0730", r0)
+        d = bot.dt.datetime(2026, 10, 7, 23, 45)
+        self.assertTrue(bot._quiet_in_window(d))
+        self.assertTrue(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 8, 6, 0)))
+        self.assertFalse(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 7, 12, 0)))
+        # 非跨午夜
+        bot._quiet_handle("靜音 1300 1500")
+        self.assertTrue(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 7, 14, 0)))
+        self.assertFalse(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 7, 15, 0)))
+        self.assertFalse(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 7, 12, 59)))
+        # 壞輸入
+        self.assertIn("❓", bot._quiet_handle("靜音 1200 1200"))
+        self.assertIn("❓", bot._quiet_handle("靜音 9990 1200"))
+        self.assertIsNone(bot._quiet_handle("唔關事"))
+        # 解除
+        self.assertIn("🔊", bot._quiet_handle("取消靜音"))
+        self.assertFalse(bot._quiet_in_window(
+            bot.dt.datetime(2026, 10, 7, 23, 45)))
+        self.assertIn("冇靜音", bot._quiet_handle("靜音"))
+
+    def test_say_skips_in_window(self):
+        import asyncio as _a
+        calls = []
+
+        class _R:
+            returncode = 0
+            stdout = b"{}"
+            stderr = b""
+
+        def frun(*a, **k):
+            calls.append(a[0] if a else k)
+            return _R()
+        bot.subprocess = type(bot.subprocess) if False else None
+        import types as _t
+        fake = _t.SimpleNamespace(run=frun)
+        bot.subprocess = fake
+        bot._QUIET_CHECK = lambda: True
+        loop = _a.new_event_loop()
+        try:
+            loop.run_until_complete(bot._say("靜音測試"))
+            n_quiet = len(calls)
+            bot._QUIET_CHECK = lambda: False
+            loop.run_until_complete(bot._say("出聲測試"))
+            n_loud = len(calls) - n_quiet
+        finally:
+            loop.close()
+        self.assertEqual(n_quiet, 0)      # 靜音：零 subprocess call
+        self.assertGreaterEqual(n_loud, 1)  # 出聲：預熱＋TTS 有 call
+
+
 class TestCalm(unittest.TestCase):
     """calm 指令：即刻開 Calm／排程 daily（用戶令：叫 calm 唔叫靜度）。"""
 

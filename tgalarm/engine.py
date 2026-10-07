@@ -71,6 +71,8 @@ CONFIG_PATH = os.path.expanduser(os.environ.get("TGALARM_CONFIG", "~/.tgalarm/co
 JOBS_PATH = os.path.expanduser(os.environ.get("TGALARM_JOBS", "~/.tgalarm/jobs.json"))
 LOCK_PATH = os.path.expanduser(os.environ.get("TGALARM_LOCK", "~/.tgalarm/bot.lock"))
 SEAL_LAST_PATH = os.path.expanduser("~/.tgalarm/seal_last.json")
+QUIET_PATH = os.path.expanduser(
+    os.environ.get("TGALARM_QUIET", "~/.tgalarm/quiet.json"))
 TAKEAWAY_PATH = os.path.expanduser(
     os.environ.get("TGALARM_TAKEAWAY", "~/.tgalarm/takeaway.json"))
 PLAYLISTS_PATH = os.path.expanduser(os.environ.get("TGALARM_PLAYLISTS", "~/.tgalarm/playlists.json"))
@@ -563,6 +565,7 @@ def _save_json(path, data) -> None:
     os.replace(tmp, path)
 
 _TAKEAWAY = _load_json(TAKEAWAY_PATH, {"on": False})
+_QUIET_CHECK = None                     # quiet 域 import 期註冊（靜音時段）
 
 
 # ---- 隨機分組 ----
@@ -724,6 +727,9 @@ async def _say(text: str, delay: float = 0.0) -> None:
     text = (text or "").strip()
     if not text:
         return
+    if _QUIET_CHECK is not None and _QUIET_CHECK():
+        log.info("🔇 靜音時段——唔出聲：%s", text[:30])
+        return
     if delay:
         await asyncio.sleep(delay)
     # vivo 會背景清理 Termux:API——凍啟動第一下會吊住（2026-09-29 實證）。
@@ -762,6 +768,7 @@ from . import nav as _nav_mod
 from . import parse as _parse_mod
 from . import patrol as _patrol_mod
 from . import player as _player_mod
+from . import quiet as _quiet_mod
 from . import sched as _sched_mod
 from . import takeaway as _takeaway_mod
 from . import todo as _todo_mod
@@ -773,6 +780,8 @@ from .core import (  # registry 別名（same dict object；bot.X 測試路徑�
 )
 
 _calm_handle = _calm_mod.handle
+_quiet_handle = _quiet_mod.handle
+_quiet_in_window = _quiet_mod.in_window
 _findef_route = _finance_mod.route
 _findef_api = _finance_mod.api
 
