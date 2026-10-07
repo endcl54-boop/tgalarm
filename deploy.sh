@@ -28,18 +28,30 @@ R=$(timeout 25 ssh -o ConnectTimeout=10 -i "$HOME/.ssh/tv_verify" phone 'md5sum 
 echo "▸ 4/6 restart（電話側 restart_bot.sh——一句即返）"
 $SSH 'bash ~/telegram-alarm-bot/restart_bot.sh' >/dev/null 2>&1
 
-echo "▸ 5/6 標準 probe（status_bot.sh：PID＋getUpdates 200）"
-for i in 1 2 3; do
-  sleep 6
+probe_check() {
   OUT=$($SSH 'bash ~/telegram-alarm-bot/status_bot.sh' 2>/dev/null)
   PID=$(echo "$OUT" | head -1)
   LOG=$(echo "$OUT" | tail -1)
-  if [ -n "$PID" ] && echo "$LOG" | grep -q "getUpdates.*200"; then
-    echo "▸ 6/6 ✅ 部署完成：md5=$L PID=$PID"
+  [ -n "$PID" ] && echo "$LOG" | grep -q "getUpdates.*200"
+}
+
+echo "▸ 5/6 標準 probe（先等 30 秒俾 bot 暖機——唔好郁佢）"
+for i in 1 2 3 4 5 6; do
+  sleep 5
+  if probe_check; then
+    echo "▸ 6/6 ✅ 部署完成：md5=$L PID=$PID（等咗 $((i*5)) 秒）"
     echo "$LOG"
     exit 0
   fi
-  echo "  ⚠️ probe 圈 $i 唔過（PID=$PID）——自動修復：restart_bot.sh 重起"
-  $SSH 'bash ~/telegram-alarm-bot/restart_bot.sh' >/dev/null 2>&1
 done
-fail "3 圈 probe 都唔過——要人手睇 bot.log"
+echo "  ⚠️ 30 秒未綠——restart_bot.sh 修復一次，再等 30 秒"
+$SSH 'bash ~/telegram-alarm-bot/restart_bot.sh' >/dev/null 2>&1
+for i in 1 2 3 4 5 6; do
+  sleep 5
+  if probe_check; then
+    echo "▸ 6/6 ✅ 部署完成（修復後）：md5=$L PID=$PID"
+    echo "$LOG"
+    exit 0
+  fi
+done
+fail "probe 60 秒都唔綠——要人手睇 bot.log"
