@@ -1000,7 +1000,11 @@ def _findef_route(t: str):
         return ("status", {})
     if t == "提議":
         return ("pick", {})
-    if t in ("活動完", "停活動"):
+    m = re.fullmatch(r"(?:活動完|停活動)\s*(\d+(?:\.\d+)?)?", t)
+    if m:
+        # 活動完 3＝按口供補時埋單（2026-10-07 個案：行緊嗰陣顯示 0）
+        if m.group(1):
+            return ("stop", {"mins": m.group(1)})
         return ("stop", {})
     m = re.fullmatch(r"活動\s+(.+)", t)
     if m:
@@ -1036,6 +1040,8 @@ def _findef_api(op: str, params: dict) -> tuple:
         lines.append(f"活動：{run['activity'] if run else '冇行緊'}"
                      f"｜今日 {act.get('todayMinutes', 0)} 分鐘")
         return True, "\n".join(lines)
+    if op == "stop" and params.get("mins"):
+        op = "stop_min"          # app 端 stop_min.mins＝手動補時埋單
     if op == "pick":
         p = d.get("pick") or {}
         return True, f"🎲 提議（{p.get('level', '')}）：{p.get('activity', '?')}"

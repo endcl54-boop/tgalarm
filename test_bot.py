@@ -2555,6 +2555,10 @@ class TestFinDef(unittest.TestCase):
         self.assertEqual(bot._findef_route("活動 落樓行 10 分鐘"),
                          ("start", {"name": "落樓行 10 分鐘"}))
         self.assertEqual(bot._findef_route("活動完"), ("stop", {}))
+        self.assertEqual(bot._findef_route("活動完 3"),
+                         ("stop", {"mins": "3"}))
+        self.assertEqual(bot._findef_route("活動完 2.5"),
+                         ("stop", {"mins": "2.5"}))
         self.assertEqual(bot._findef_route("提議"), ("pick", {}))
         self.assertEqual(bot._findef_route("使咗 50 午餐"),
                          ("expense", {"amt": "50", "kind": None,
@@ -2596,6 +2600,28 @@ class TestFinDef(unittest.TestCase):
                          "▶️ 開始：落樓行")
         self._mock({"ok": True, "message": "⏹️ 落樓行：10 分鐘"})
         self.assertIn("10 分鐘", bot._findef_api("stop", {})[1])
+        # 補時版：stop+mins → op=stop_min
+        seen_req = []
+
+        class R2:
+            full_url = "https://gas.test/exec?op=stop_min&key=K1&mins=2.5"
+
+            def read(self_):
+                return json.dumps({"ok": True,
+                                   "message": "⏹️ 食早餐：2.5 分鐘"}).encode()
+
+            def __enter__(self_):
+                seen_req.append(self_.full_url)
+                return self_
+
+            def __exit__(self_, *a):
+                return False
+        import urllib.request
+        urllib.request.urlopen = lambda req, timeout=25: R2()
+        ok3, _txt3 = bot._findef_api("stop", {"mins": "2.5"})
+        self.assertTrue(ok3)
+        self.assertIn("stop_min", seen_req[-1])
+        self.assertIn("mins=2.5", seen_req[-1])
         self._mock({"ok": True, "pick": {"level": "🔥",
                                          "activity": "煮一餐新嘢"}})
         self.assertIn("煮一餐新嘢", bot._findef_api("pick", {})[1])
